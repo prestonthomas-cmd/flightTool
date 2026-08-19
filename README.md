@@ -41,8 +41,8 @@ git clone <your repo> && cd flight-price-tracker
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp watches.example.yaml watches.yaml   # then edit it
 cp .env.example .env                   # then fill in SMTP details
+$EDITOR watches.yaml                   # replace the example trips with yours
 
 flighttracker validate      # check the watchlist, see what each run will do
 flighttracker run --dry-run # fetch real prices, print the digest, store nothing
@@ -53,8 +53,10 @@ Without installing, every command also works as `python -m flighttracker ...`.
 
 ## The watchlist
 
-`watches.yaml` is the only file you edit. `watches.example.yaml` is a commented
-starting point; this is the shape:
+`watches.yaml` is the only file you edit. It ships with the three example
+watches so the scheduled workflows do something on their first run — replace
+them with trips you care about, since every watch is scraped on every run.
+`watches.example.yaml` keeps a pristine annotated copy. This is the shape:
 
 ```yaml
 settings:
@@ -309,13 +311,27 @@ setting, and every chart has a hover readout and a table view underneath.
 The tracker rebuilds it on every run and commits it to the repo, where it stays
 private.
 
-**Publishing it is opt-in, and worth thinking about first.** A GitHub Pages
-site is public even when the repository is private — outside Enterprise Cloud
-with access control there is no middle setting. Publishing puts your watchlist,
-your dates and your prices on a public URL. `.github/workflows/pages.yml` will
-do it, but only once you both enable Pages (Settings → Pages → Source: GitHub
-Actions) and set the repository variable `PUBLISH_DASHBOARD` to `true`. Leave
-either unset and nothing is published.
+### Publishing it
+
+**Worth thinking about before you do.** A GitHub Pages site is public even when
+the repository is private — outside Enterprise Cloud with access control there
+is no middle setting. Publishing puts your watchlist, your dates and your
+prices on a guessable public URL. Pages for a private repo also needs a paid
+plan; on the free plan the only way to publish is to make the repository
+public, which shows the source and the whole price history too.
+
+If you want it anyway:
+
+- **Once** — Actions → *Publish the dashboard* → **Run workflow**. That single
+  click enables Pages for the repo and deploys. The URL is
+  `https://<you>.github.io/<repo>/`, and the workflow prints it when it
+  finishes.
+- **After every tracking run** — set the repository variable
+  `PUBLISH_DASHBOARD` to `true` (Settings → Secrets and variables → Actions →
+  Variables).
+
+Do neither and nothing is published; the tracker still commits
+`site/index.html` to the repo, where it stays private.
 
 ## Comparing like with like
 

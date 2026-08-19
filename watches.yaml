@@ -1,0 +1,136 @@
+# YOUR watchlist. This is the file to edit.
+#
+# It ships with the three example watches so the scheduled workflows do
+# something the first time they run — replace them with trips you actually care
+# about. Every watch here is scraped on every run, so delete what you do not
+# want rather than leaving it collecting prices.
+#
+# `flighttracker validate` checks this file and prints exactly what each run
+# will search, including how long the scraping will take.
+#
+# Changing a watch's dates, cabin, passengers or bag settings changes what is
+# being priced, so its history stops being comparable. Give it a new `id` when
+# the trip itself changes — `flighttracker doctor` will tell you when this has
+# happened.
+
+settings:
+  # Relative paths are resolved against this file, so cron and CI behave the
+  # same wherever they are run from.
+  db_path: data/prices.db
+  currency: USD
+
+  # Google Flights has no published rate limit. Searches are spaced by
+  # `request_delay_seconds` plus up to `request_jitter_seconds` of jitter.
+  request_delay_seconds: 4
+  request_jitter_seconds: 2
+  max_retries: 3
+  retry_backoff_seconds: 5
+
+  # How many runs a watch needs before its own history is worth comparing
+  # against. Under this, only a `max_price_alert` ceiling can fire. At two runs
+  # a day, 20 is about ten days.
+  min_observations: 20
+
+  # A price at or below this percentile of the watch's own history is a signal.
+  percentile: 20
+  # ...and it must also sit far enough below the watch's median to be worth an
+  # email. Without this the percentile rule fires on a price that is not low at
+  # all: the 20th percentile of a price that never moves *is* that price.
+  #
+  # The bar scales with each watch's own volatility, floored at `min_discount`
+  # and capped at `max_discount` — a fare that swings 15% should not alert on
+  # the same 2% dip that means something on a stable one. Set
+  # `adaptive_discount: false` for a flat bar.
+  min_discount: 0.02
+  adaptive_discount: true
+  discount_volatility_multiple: 0.75
+  max_discount: 0.25
+
+  # A watch with no *successful* lookup for this long is not being tracked, and
+  # the digest and `flighttracker doctor` both say so loudly. Counts successful
+  # lookups, not runs: a run that fails every lookup does not reset the clock.
+  stale_after_hours: 30
+
+  # Refuse a watch whose date ranges expand past this many searches — every
+  # combination is a separate scrape on every run.
+  max_combinations: 60
+
+  # Don't repeat an alert within this many hours unless the price has dropped a
+  # further `alert_improvement` fraction.
+  alert_cooldown_hours: 48
+  alert_improvement: 0.03
+
+  # --- Forecasting ----------------------------------------------------------
+  # These only affect the outlook shown beside each watch. Nothing here can
+  # suppress a buy signal.
+  #
+  # Runs before this watch's own trend line is worth drawing, and how far back
+  # that line looks.
+  min_trend_observations: 8
+  trend_window_runs: 60
+  # A step change is the newest runs against the stretch before them. A robust
+  # trend line is designed to ignore a few odd points, which means it also
+  # ignores a genuine cliff — hence measuring the step separately.
+  move_recent_runs: 5
+  move_baseline_runs: 20
+  move_threshold: 0.05
+  # The booking-horizon curve pools every watch by days-to-departure. A bucket
+  # needs this many observations from this many *different* watches: one watch's
+  # price against days-out is the same series as its price over time, so one
+  # watch alone cannot tell a horizon effect from the calendar.
+  horizon_min_bucket_samples: 8
+  horizon_min_watches: 2
+  # Once the curve is good enough, re-base past prices onto today's point in
+  # the booking window before judging them, so a percentile is not computed
+  # against months-old prices taken at a different distance from departure.
+  # The digest says `horizon-adjusted baseline` whenever this applies.
+  horizon_adjusted_baseline: true
+
+  # "When the price was around here before, did waiting pay?" — needs this many
+  # comparable past runs, each with this many runs after it to look at.
+  min_waiting_cases: 5
+  waiting_lookahead_runs: 5
+
+  # Departure weekday, pooled across watches. Same two-watch gate as the curve.
+  weekday_min_samples: 6
+  weekday_min_watches: 2
+
+watches:
+  # A round trip with flexible dates on both ends. The two ranges would make
+  # 11 x 11 = 121 searches, so `trip_length_nights` narrows it to the trip
+  # lengths actually wanted — 14 to 16 nights, which is 30 searches.
+  - id: nyc-to-tokyo-dec
+    label: NYC to Tokyo, December
+    origin: JFK
+    destination: HND
+    depart_date_range: [2026-12-10, 2026-12-20]
+    return_date_range: [2026-12-24, 2027-01-03]
+    trip_length_nights: [14, 16]
+    cabin: economy
+    max_price_alert: 900
+
+  # Fixed dates, two travellers, nonstop only.
+  - id: sf-to-lisbon-spring
+    label: SF to Lisbon, spring
+    origin: SFO
+    destination: LIS
+    depart_date_range: 2027-03-01
+    return_date_range: 2027-03-15
+    cabin: premium-economy
+    max_stops: 0
+    passengers:
+      adults: 2
+    # These change what is being priced, so they are part of the comparison
+    # basis. Changing one mid-history makes the old prices incomparable, and
+    # `doctor` will tell you so. `exclude_basic_economy` defaults to true.
+    checked_bags: 1
+    hide_separate_and_self_transfer: true
+
+  # One-way: leave out `return_date_range`. This one alerts sooner and on a
+  # looser threshold than the global defaults.
+  - id: austin-to-denver-ski
+    origin: AUS
+    destination: DEN
+    depart_date_range: [2027-01-15, 2027-01-18]
+    min_observations: 8
+    percentile: 25

@@ -2,16 +2,26 @@ name: Publish the dashboard
 
 # OPT-IN, AND DELIBERATELY SO.
 #
-# A GitHub Pages site is public even when the repository is private (outside
-# Enterprise Cloud with access control). Publishing puts your watchlist, your
-# dates and your prices on a public URL. Nothing here runs until you both:
+# A GitHub Pages site is PUBLIC even when the repository is private — outside
+# Enterprise Cloud with access control there is no middle setting. Publishing
+# puts your watchlist, your dates and your prices on a guessable public URL.
 #
-#   1. enable Pages for this repo — Settings > Pages > Source: GitHub Actions
-#   2. set the repository variable PUBLISH_DASHBOARD to `true`
-#      (Settings > Secrets and variables > Actions > Variables)
+# To publish once:
+#   Actions > "Publish the dashboard" > Run workflow.
+#   That single click enables Pages for the repo and deploys.
 #
-# Without both, the tracker still builds `site/index.html` on every run and
-# commits it to the repo, where it stays private. Clone and open it.
+# To publish after every tracking run:
+#   set the repository variable PUBLISH_DASHBOARD to `true`
+#   (Settings > Secrets and variables > Actions > Variables).
+#
+# Do neither and nothing is ever published. The tracker still builds
+# `site/index.html` on every run and commits it to the repo, where it stays
+# private — clone it and open the file.
+#
+# GitHub Pages for a *private* repository needs a paid plan. On the free plan
+# the enablement step below fails, and the only way to publish is to make the
+# repository public — which puts the source and the whole price history on
+# show, not just the page.
 
 on:
   workflow_dispatch:
@@ -30,7 +40,9 @@ concurrency:
 
 jobs:
   publish:
-    if: vars.PUBLISH_DASHBOARD == 'true'
+    # A manual run is itself the deliberate act, so it does not also need the
+    # variable; the automatic run after each tracking run does.
+    if: github.event_name == 'workflow_dispatch' || vars.PUBLISH_DASHBOARD == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -41,6 +53,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - run: pip install PyYAML
 
@@ -48,9 +61,18 @@ jobs:
       # HTML, so the published page always matches the data in the repo.
       - run: python -m flighttracker dashboard --out site/index.html
 
+      # `enablement` turns Pages on for the repository the first time this
+      # runs, so publishing takes one click rather than a trip through Settings.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
       - id: deploy
         uses: actions/deploy-pages@v4
+
+      - name: Say where it went
+        run: echo "Published to ${{ steps.deploy.outputs.page_url }}"
