@@ -19,8 +19,9 @@ from statistics import median
 from typing import Optional, Sequence
 
 from .config import Settings, Watch
+from .forecast import rebase
 from .signals import evaluate
-from .store import SentAlert, parse_iso, run_history
+from .store import SentAlert, horizon_samples, parse_iso, run_history
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class Result:
     median_price: Optional[float] = None
     last_price: Optional[float] = None
     span_days: int = 0
+    horizon_adjusted: bool = False
 
     @property
     def first_alert(self) -> Optional[Alert]:
@@ -86,25 +88,40 @@ class Result:
 def run_backtest(
     conn: Connection, watch: Watch, settings: Settings
 ) -> Result:
-    """Replay one watch through the real signal code, run by run."""
+    """Replay one watch through the real signal code, run by run.
+
+    One caveat worth stating plainly: with `horizon_adjusted_baseline` on, the
+    curve used to re-base each step is built from the whole stored dataset,
+    including runs that had not happened yet at the point being replayed. The
+    prices being judged are strictly historical, but the adjustment applied to
+    them is not, so an adjusted replay flatters itself slightly. Compare an
+    adjusted run against a raw one to see the size of the effect, not to
+    conclude the adjustment is free.
+    """
     history = run_history(conn, watch.id)
     if not history:
         return Result(watch=watch, settings=settings, runs=0, alerts=())
 
+    samples = horizon_samples(conn) if settings.horizon_adjusted_baseline else []
     alerts: list[Alert] = []
     last: Optional[SentAlert] = None
+    adjusted_any = False
 
     for index, point in enumerate(history):
+        # Only what was knowable at the time. Feeding the whole series in would
+        # let every run "discover" lows that had not happened yet.
+        at = parse_iso(point.timestamp)
+        earlier, adjusted = rebase(samples, watch, history[:index], settings, at)
+        adjusted_any = adjusted_any or adjusted
+
         verdict = evaluate(
             watch=watch,
             price=point.price,
-            # Only what was knowable at the time. Feeding the whole series in
-            # would let every run "discover" lows that had not happened yet.
-            history=history[:index],
+            history=earlier,
             settings=settings,
             currency="",
             last=last,
-            now=parse_iso(point.timestamp),
+            now=at,
         )
         if verdict.flagged:
             alert = Alert(point.timestamp, point.price, verdict.reason_codes)
@@ -125,6 +142,7 @@ def run_backtest(
         median_price=float(median(prices)),
         last_price=history[-1].price,
         span_days=span,
+        horizon_adjusted=adjusted_any,
     )
 
 
@@ -155,6 +173,12 @@ def format_result(result: Result, currency: str = "") -> list[str]:
         f"median {unit}{result.median_price:,.0f} · "
         f"latest {unit}{result.last_price:,.0f}",
     ]
+    if result.horizon_adjusted:
+        lines.append(
+            "  baseline re-based onto each run's point in the booking window "
+            "(the curve itself uses the whole dataset, so this flatters itself "
+            "a little)"
+        )
 
     if not result.alerts:
         lines.append("  would have sent no alerts at all")

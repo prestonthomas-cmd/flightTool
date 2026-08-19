@@ -25,16 +25,25 @@ from typing import Optional, Sequence
 
 from .config import Settings, Watch
 from .holidays import describe, is_peak, peak_window
-from .store import HorizonSample, RunPoint, horizon_samples, parse_iso
+from .store import (
+    HorizonSample,
+    RunPoint,
+    date_prices,
+    horizon_samples,
+    parse_iso,
+)
 
 FALLING = "falling"
 RISING = "rising"
 FLAT = "flat"
 UNKNOWN = "unknown"
 
-# Days from departure. Narrow near the end, where prices move fastest.
+# Days from departure. The edges sit on the advance-purchase boundaries
+# airlines actually write fare rules against — 21, 14, 7 and 3 days — so a step
+# in price lands between buckets instead of being smeared across one.
 BUCKETS: tuple[tuple[int, int], ...] = (
-    (0, 6),
+    (0, 2),
+    (3, 6),
     (7, 13),
     (14, 20),
     (21, 29),
@@ -300,6 +309,303 @@ def curve_for_watch(
     return build_curve(samples, settings)
 
 
+WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+
+
+@dataclass(frozen=True)
+class WaitingRecord:
+    """When this watch was around this cheap before, did waiting pay?
+
+    A frequency drawn from the watch's own history, not a model: of the past
+    runs priced at a comparable point in their own distribution, how many were
+    followed by something cheaper, and by how much. It answers the question
+    actually being asked — buy now, or wait — without pretending to forecast.
+    """
+
+    cases: int
+    followed_lower: int
+    median_drop: float
+
+    @property
+    def share(self) -> float:
+        return self.followed_lower / self.cases if self.cases else 0.0
+
+    def describe(self) -> str:
+        # "About this low" would be wrong half the time — the same reading
+        # applies when the price is sitting near its high, and that is exactly
+        # when the answer matters most.
+        when = f"{self.cases} past run(s) priced around here"
+        if not self.followed_lower:
+            return f"in {when}, nothing cheaper ever followed"
+        return (
+            f"in {self.followed_lower} of {when}, something cheaper followed — "
+            f"typically {self.median_drop:.0%} lower"
+        )
+
+
+def _rank(price: float, earlier: Sequence[float]) -> Optional[float]:
+    """What fraction of the earlier prices were strictly below this one."""
+    if not earlier:
+        return None
+    return sum(1 for value in earlier if value < price) / len(earlier)
+
+
+def waiting_record(
+    history: Sequence[RunPoint], price: float, settings: Settings, band: float = 0.15
+) -> Optional[WaitingRecord]:
+    """How often waiting paid, at past runs priced like this one."""
+    prices = [point.price for point in history]
+    here = _rank(price, prices)
+    if here is None:
+        return None
+
+    lookahead = max(settings.waiting_lookahead_runs, 1)
+    cases = 0
+    lower = 0
+    drops: list[float] = []
+
+    for index, point in enumerate(history):
+        future = prices[index + 1 :]
+        # A run near the end of the series has barely any future to judge, and
+        # counting it would bias the answer towards "waiting never paid".
+        if len(future) < lookahead:
+            break
+        # Ranked against the same population as the price being judged. Using
+        # only each run's own past would rank every point in a falling series
+        # at zero, and nothing would ever match.
+        rank = _rank(point.price, prices)
+        if rank is None or abs(rank - here) > band:
+            continue
+        cases += 1
+        cheapest = min(future)
+        if cheapest < point.price:
+            lower += 1
+            drops.append((point.price - cheapest) / point.price)
+
+    if cases < settings.min_waiting_cases:
+        return None
+    return WaitingRecord(cases, lower, float(median(drops)) if drops else 0.0)
+
+
+@dataclass(frozen=True)
+class WeekdayProfile:
+    """Relative price by departure weekday, pooled across watches."""
+
+    index: dict[int, float]
+    samples: dict[int, int]
+    scope: str
+    watches: int
+
+    @property
+    def usable(self) -> bool:
+        return len(self.index) >= 3
+
+    @property
+    def cheapest(self) -> Optional[int]:
+        return min(self.index, key=self.index.get) if self.index else None
+
+    def standing(self, weekday: int) -> Optional[str]:
+        best = self.cheapest
+        if best is None or weekday not in self.index:
+            return None
+        here = self.index[weekday]
+        gap = (here / self.index[best]) - 1
+        if best == weekday:
+            return f"{WEEKDAY_NAMES[weekday]} is the cheapest day to depart"
+        if gap < 0.02:
+            return (
+                f"{WEEKDAY_NAMES[weekday]} is about as cheap as the best day, "
+                f"{WEEKDAY_NAMES[best]}"
+            )
+        return (
+            f"{WEEKDAY_NAMES[weekday]} departures run about {gap:.0%} above "
+            f"{WEEKDAY_NAMES[best]}, the cheapest day"
+        )
+
+
+def build_weekday_profile(
+    samples: Sequence[HorizonSample],
+    settings: Settings,
+    origin: Optional[str] = None,
+    destination: Optional[str] = None,
+) -> WeekdayProfile:
+    """Pool observations by departure weekday, normalised per watch.
+
+    Same two-watch gate as the horizon curve, and for the same reason: a single
+    watch whose departures all fall on one weekday would otherwise "prove" that
+    weekday is cheap.
+    """
+    scope = "all watches"
+    if origin and destination:
+        routed = [s for s in samples if s.origin == origin and s.destination == destination]
+        if routed:
+            samples, scope = routed, f"{origin}-{destination}"
+
+    baselines: dict[str, float] = {}
+    grouped: dict[str, list[float]] = {}
+    for sample in samples:
+        grouped.setdefault(sample.watch_id, []).append(sample.price)
+    for watch_id, prices in grouped.items():
+        middle = median(prices)
+        if middle > 0:
+            baselines[watch_id] = middle
+
+    by_day: dict[int, list[float]] = {}
+    contributors: dict[int, set[str]] = {}
+    for sample in samples:
+        baseline = baselines.get(sample.watch_id)
+        if not baseline:
+            continue
+        try:
+            weekday = date.fromisoformat(sample.depart_date).weekday()
+        except ValueError:
+            continue
+        by_day.setdefault(weekday, []).append(sample.price / baseline)
+        contributors.setdefault(weekday, set()).add(sample.watch_id)
+
+    index = {
+        day: float(median(values))
+        for day, values in by_day.items()
+        if len(values) >= settings.weekday_min_samples
+        and len(contributors[day]) >= settings.weekday_min_watches
+    }
+    return WeekdayProfile(
+        index=index,
+        samples={day: len(by_day[day]) for day in index},
+        scope=scope,
+        watches=len({w for group in contributors.values() for w in group}),
+    )
+
+
+@dataclass(frozen=True)
+class DateStanding:
+    """How this date sits against its own window, versus how it usually does.
+
+    The within-run comparison says a date is cheaper than its neighbours today.
+    This says whether it is cheaper *than it usually is* relative to them —
+    which separates a date-specific opportunity from the whole window moving.
+    """
+
+    depart_date: str
+    now: float
+    usual: float
+    samples: int
+
+    @property
+    def delta(self) -> float:
+        return self.now - self.usual
+
+    def describe(self) -> str:
+        # Below half a percent rounds to "0%", which reads as broken.
+        if abs(self.usual) < 0.005:
+            usual = "normally level with the rest of its window"
+        else:
+            usual = (
+                f"normally {abs(self.usual):.0%} "
+                f"{'below' if self.usual < 0 else 'above'} the rest of its window"
+            )
+        if abs(self.now) < 0.005:
+            here = "today it is level with them"
+        else:
+            here = (
+                f"today it is {abs(self.now):.0%} "
+                f"{'below' if self.now < 0 else 'above'}"
+            )
+        if abs(self.delta) < 0.02:
+            return (
+                f"{self.depart_date} is {usual}, and {here} — no better placed "
+                f"than usual ({self.samples} runs)"
+            )
+        verdict = (
+            "unusually well placed against its own window"
+            if self.delta < 0
+            else "less well placed against its own window than usual"
+        )
+        return (
+            f"{self.depart_date} is {usual}, but {here} — {verdict} "
+            f"({self.samples} runs)"
+        )
+
+
+def date_standing(
+    rows: Sequence[tuple[str, str, float]], depart_date: Optional[str], minimum: int = 5
+) -> Optional[DateStanding]:
+    """Track one date's gap to its window over time, not just today."""
+    if not depart_date:
+        return None
+
+    by_run: dict[str, dict[str, float]] = {}
+    for timestamp, day, price in rows:
+        run = by_run.setdefault(timestamp, {})
+        if day not in run or price < run[day]:
+            run[day] = price
+
+    residuals: list[float] = []
+    latest: Optional[float] = None
+    for timestamp in sorted(by_run):
+        prices = by_run[timestamp]
+        # A window of one date has no "rest of the window" to sit against.
+        if len(prices) < 2 or depart_date not in prices:
+            continue
+        others = [p for day, p in prices.items() if day != depart_date]
+        typical = float(median(others))
+        if typical <= 0:
+            continue
+        residual = prices[depart_date] / typical - 1
+        residuals.append(residual)
+        latest = residual
+
+    if latest is None or len(residuals) < minimum:
+        return None
+    return DateStanding(
+        depart_date=depart_date,
+        now=latest,
+        usual=float(median(residuals[:-1])) if len(residuals) > 1 else latest,
+        samples=len(residuals),
+    )
+
+
+def horizon_adjust(
+    history: Sequence[RunPoint],
+    curve: HorizonCurve,
+    departure: date,
+    now: datetime,
+) -> tuple[list[RunPoint], bool]:
+    """Re-base past prices onto today's point in the booking window.
+
+    Prices move systematically with distance from departure, so a history
+    collected months ago is not on the same footing as today's price. Each past
+    price is scaled by the ratio of the curve at today's horizon to the curve at
+    the horizon it was taken at, which puts the whole series on today's terms
+    before any percentile is computed.
+
+    Returns the history unchanged, and False, whenever the curve cannot say
+    enough — this never silently invents an adjustment.
+    """
+    if not curve.usable:
+        return list(history), False
+
+    here = curve.bucket_for((departure - now.date()).days)
+    if here is None or here.index <= 0:
+        return list(history), False
+
+    adjusted: list[RunPoint] = []
+    changed = False
+    for point in history:
+        days = (departure - parse_iso(point.timestamp).date()).days
+        bucket = curve.bucket_for(days) if days >= 0 else None
+        if bucket is None or bucket.index <= 0 or bucket is here:
+            adjusted.append(point)
+            continue
+        adjusted.append(
+            RunPoint(point.timestamp, point.price * (here.index / bucket.index))
+        )
+        changed = True
+    return adjusted, changed
+
+
 @dataclass(frozen=True)
 class Forecast:
     direction: str
@@ -311,6 +617,8 @@ class Forecast:
     trend: Optional[Trend] = None
     move: Optional[Move] = None
     curve_scope: Optional[str] = None
+    waiting: Optional[WaitingRecord] = None
+    standing: Optional[DateStanding] = None
 
     @property
     def known(self) -> bool:
@@ -434,6 +742,7 @@ def build_forecast(
     best_depart: Optional[str] = None,
     run_rows: Sequence[tuple[str, float]] = (),
     currency: str = "USD",
+    price: Optional[float] = None,
 ) -> Forecast:
     """Combine every available reading into one annotation."""
     notes: list[str] = []
@@ -452,9 +761,8 @@ def build_forecast(
         except ValueError:
             days_out = None
 
-    curve = curve_for_watch(
-        horizon_samples(conn), settings, watch.origin, watch.destination
-    )
+    samples = horizon_samples(conn)
+    curve = curve_for_watch(samples, settings, watch.origin, watch.destination)
     curve_direction = UNKNOWN
     trough: Optional[HorizonBucket] = None
 
@@ -489,6 +797,26 @@ def build_forecast(
             f"watches with overlapping histories (have {curve.watches})."
         )
 
+    profile = build_weekday_profile(
+        samples, settings, watch.origin, watch.destination
+    )
+    if profile.usable and best_depart:
+        try:
+            standing = profile.standing(date.fromisoformat(best_depart).weekday())
+        except ValueError:
+            standing = None
+        if standing:
+            total = sum(profile.samples.values())
+            notes.append(f"{standing} ({total} observations, {profile.scope}).")
+
+    record = waiting_record(history, price, settings) if price is not None else None
+    if record is not None:
+        notes.append(f"Historically, {record.describe()}.")
+
+    placing = date_standing(date_prices(conn, watch.id), best_depart)
+    if placing is not None:
+        notes.append(placing.describe()[0].upper() + placing.describe()[1:] + ".")
+
     neighbours = compare_neighbours(run_rows, best_depart, currency)
     if neighbours:
         notes.append(neighbours[0].upper() + neighbours[1:] + ".")
@@ -509,6 +837,8 @@ def build_forecast(
         trend=trend,
         move=move,
         curve_scope=curve.scope if curve.usable else None,
+        waiting=record,
+        standing=placing,
     )
 
 
@@ -566,3 +896,22 @@ def _curve_sentence(direction: str, trough: Optional[HorizonBucket]) -> str:
     if direction == RISING:
         return "Past the usual trough — prices like this tend to rise from here."
     return "Prices like this are usually flat from here."
+
+
+def rebase(
+    samples: Sequence[HorizonSample],
+    watch: Watch,
+    history: Sequence[RunPoint],
+    settings: Settings,
+    now: datetime,
+) -> tuple[list[RunPoint], bool]:
+    """Put a watch's history on today's terms, if the curve is good enough.
+
+    The second value says whether anything actually changed, so a caller can
+    report an adjusted baseline honestly rather than claiming one that was
+    never applied.
+    """
+    if not settings.horizon_adjusted_baseline or not watch.depart_dates:
+        return list(history), False
+    curve = curve_for_watch(samples, settings, watch.origin, watch.destination)
+    return horizon_adjust(history, curve, min(watch.depart_dates), now)

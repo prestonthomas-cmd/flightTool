@@ -51,6 +51,11 @@ class Stats:
     mean: Optional[float] = None
     threshold: Optional[float] = None
     percentile_used: Optional[float] = None
+    # Median absolute deviation over the median: how much this watch's price
+    # actually moves, as a fraction. Robust to the odd scraped outlier in a way
+    # a standard deviation is not.
+    volatility: Optional[float] = None
+    required_discount: Optional[float] = None
 
     @property
     def has_history(self) -> bool:
@@ -78,9 +83,19 @@ class Verdict:
     # Filled in after the fact by `run.attach_forecasts`: where the price looks
     # to be heading. Never changes whether the watch is flagged.
     forecast: object = None
+    # "raw", or "horizon-adjusted" when the history was re-based onto today's
+    # point in the booking window before being judged.
+    baseline: str = "raw"
+
+    @property
+    def horizon_adjusted(self) -> bool:
+        return self.baseline == "horizon-adjusted"
 
     def with_forecast(self, forecast) -> "Verdict":
         return replace(self, forecast=forecast)
+
+    def with_baseline(self, baseline: str) -> "Verdict":
+        return replace(self, baseline=baseline)
 
     @property
     def flagged(self) -> bool:
@@ -97,11 +112,34 @@ class Verdict:
         return (self.stats.median - self.price) / self.stats.median
 
 
+def volatility_of(prices: Sequence[float]) -> Optional[float]:
+    """How much this price moves, as a fraction of its typical level.
+
+    Median absolute deviation rather than a standard deviation: one scraped
+    outlier should not make a stable fare look volatile.
+    """
+    if len(prices) < 3:
+        return None
+    middle = median(prices)
+    if middle <= 0:
+        return None
+    return float(median([abs(price - middle) for price in prices])) / middle
+
+
+def required_discount(volatility: Optional[float], settings: Settings) -> float:
+    """How far below its median a price must sit before it is worth an email."""
+    if not settings.adaptive_discount or volatility is None:
+        return settings.min_discount
+    scaled = volatility * settings.discount_volatility_multiple
+    return min(max(scaled, settings.min_discount), settings.max_discount)
+
+
 def summarize(history: Sequence[RunPoint], watch: Watch, settings: Settings) -> Stats:
     prices = [point.price for point in history]
     if not prices:
         return Stats(count=0)
     q = watch.threshold_percentile(settings)
+    swing = volatility_of(prices)
     return Stats(
         count=len(prices),
         minimum=min(prices),
@@ -110,6 +148,8 @@ def summarize(history: Sequence[RunPoint], watch: Watch, settings: Settings) -> 
         mean=float(fmean(prices)),
         threshold=percentile(prices, q),
         percentile_used=q,
+        volatility=swing,
+        required_discount=required_discount(swing, settings),
     )
 
 
@@ -168,9 +208,14 @@ def evaluate(
                 Reason(
                     BELOW_PERCENTILE,
                     f"{money} is in the cheapest {stats.percentile_used:g}% of "
-                    f"{stats.count} runs (threshold {currency} "
-                    f"{stats.threshold:,.0f}, median {currency} "
-                    f"{stats.median:,.0f})",
+                    f"{stats.count} runs and {stats.required_discount:.0%} or "
+                    f"more below its median of {currency} {stats.median:,.0f}"
+                    + (
+                        f" (a bar set by this watch's own "
+                        f"{stats.volatility:.0%} volatility)"
+                        if settings.adaptive_discount and stats.volatility
+                        else ""
+                    ),
                 )
             )
 
@@ -213,7 +258,12 @@ def _is_materially_cheap(price: float, stats: Stats, settings: Settings) -> bool
     """
     if not stats.median:
         return False
-    return price <= stats.median * (1 - settings.min_discount)
+    needed = (
+        stats.required_discount
+        if stats.required_discount is not None
+        else settings.min_discount
+    )
+    return price <= stats.median * (1 - needed)
 
 
 def _with_note(verdict: Verdict, note: Optional[str]) -> Verdict:

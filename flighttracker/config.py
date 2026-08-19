@@ -69,6 +69,14 @@ class Settings:
     # and on a series with one old outlier the threshold sits at the modal
     # price, so an entirely ordinary price satisfies "in the cheapest 20%".
     min_discount: float = 0.02
+    # "Wait" is only advice worth giving if the price actually moves. A watch
+    # that swings 15% a week should not alert on the same 2% dip that means
+    # something on a stable fare, so the required discount scales with the
+    # watch's own volatility, floored at `min_discount` and capped at
+    # `max_discount`. Set `adaptive_discount: false` for a flat threshold.
+    adaptive_discount: bool = True
+    discount_volatility_multiple: float = 0.75
+    max_discount: float = 0.25
     max_combinations: int = 60
     alert_cooldown_hours: float = 48.0
     # A price that keeps sitting at its all-time low would otherwise alert every
@@ -91,6 +99,19 @@ class Settings:
     # distinct watches, before it is allowed into the curve.
     horizon_min_bucket_samples: int = 8
     horizon_min_watches: int = 2
+    # Re-base a watch's history onto today's point in the booking window before
+    # judging it, so a price is not compared against months-old prices taken at
+    # a systematically different distance from departure. Only ever applied
+    # when the curve is good enough to say something.
+    horizon_adjusted_baseline: bool = True
+    # "When the price was this cheap before, did waiting pay?" Needs this many
+    # comparable past runs, each with this many runs after it to look at.
+    min_waiting_cases: int = 5
+    waiting_lookahead_runs: int = 5
+    # Departure weekday is one of the strongest fare drivers, and needs the
+    # same two-watch gate as the horizon curve for the same reason.
+    weekday_min_samples: int = 6
+    weekday_min_watches: int = 2
     # A step change is measured as the newest runs against the stretch before
     # them, reported once it clears `move_threshold`.
     move_recent_runs: int = 5
@@ -260,6 +281,10 @@ def _parse_settings(raw: Any, problems: list[str], source: Path) -> Settings:
         "horizon_min_watches",
         "move_recent_runs",
         "move_baseline_runs",
+        "min_waiting_cases",
+        "waiting_lookahead_runs",
+        "weekday_min_samples",
+        "weekday_min_watches",
     ):
         if key in values and values[key] < 1:
             problems.append(f"settings.{key}: should be at least 1")
@@ -268,7 +293,20 @@ def _parse_settings(raw: Any, problems: list[str], source: Path) -> Settings:
     return Settings(**values)
 
 
+# Derived from the defaults rather than hand-listed, so a new flag cannot be
+# added to Settings and then silently refuse to be set from YAML.
+BOOLEAN_SETTINGS = frozenset(
+    name
+    for name, field in Settings.__dataclass_fields__.items()
+    if isinstance(field.default, bool)
+)
+
+
 def _coerce_setting(key: str, value: Any, source: Path):
+    if key in BOOLEAN_SETTINGS:
+        if not isinstance(value, bool):
+            raise ValueError(f"expected true or false, got {value!r}")
+        return value
     if key == "db_path":
         candidate = Path(str(value)).expanduser()
         # A relative path is relative to the watchlist file, so the tool behaves
@@ -289,6 +327,10 @@ def _coerce_setting(key: str, value: Any, source: Path):
         "horizon_min_watches",
         "move_recent_runs",
         "move_baseline_runs",
+        "min_waiting_cases",
+        "waiting_lookahead_runs",
+        "weekday_min_samples",
+        "weekday_min_watches",
     }:
         return _as_int(value)
     return _as_float(value)

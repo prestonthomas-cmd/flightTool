@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from flighttracker.config import Settings
 from flighttracker.signals import (
     ALL_TIME_LOW,
+    required_discount,
+    volatility_of,
     BELOW_PERCENTILE,
     UNDER_CEILING,
     evaluate,
@@ -62,7 +64,11 @@ class Summarising(unittest.TestCase):
 
 class BuySignals(unittest.TestCase):
     def setUp(self):
-        self.settings = Settings(min_observations=5, percentile=20)
+        # A flat threshold unless a test is specifically about the adaptive one,
+        # so the percentile behaviour is exercised in isolation.
+        self.settings = Settings(
+            min_observations=5, percentile=20, adaptive_discount=False
+        )
 
     def judge(self, price, past, watch=None, last=None, settings=None):
         return evaluate(
@@ -141,19 +147,22 @@ class BuySignals(unittest.TestCase):
         self.assertFalse(verdict.flagged)
 
     def test_a_barely_below_median_price_is_not_worth_an_email(self):
-        settings = Settings(min_observations=3, percentile=50, min_discount=0.02)
+        settings = Settings(min_observations=3, percentile=50, min_discount=0.02,
+                            adaptive_discount=False)
         verdict = self.judge(699, history(500, 700, 900), settings=settings)
         self.assertFalse(verdict.flagged)
 
     def test_a_real_discount_still_alerts_at_a_high_percentile(self):
         """The guard must not quietly disable percentiles near the median."""
-        settings = Settings(min_observations=3, percentile=50, min_discount=0.02)
+        settings = Settings(min_observations=3, percentile=50, min_discount=0.02,
+                            adaptive_discount=False)
         verdict = self.judge(650, history(500, 700, 900), settings=settings)
         self.assertTrue(verdict.flagged)
         self.assertEqual([r.code for r in verdict.reasons], [BELOW_PERCENTILE])
 
     def test_an_all_time_low_is_unaffected_by_the_discount_guard(self):
-        settings = Settings(min_observations=3, min_discount=0.50)
+        settings = Settings(min_observations=3, min_discount=0.50,
+                            adaptive_discount=False)
         verdict = self.judge(899, history(900, 900, 900, 900, 900), settings=settings)
         self.assertTrue(verdict.flagged)
         self.assertEqual([r.code for r in verdict.reasons], [ALL_TIME_LOW])
@@ -163,6 +172,82 @@ class BuySignals(unittest.TestCase):
         verdict = self.judge(650, history(500, 700, 900), watch=watch)
         self.assertTrue(verdict.flagged)
         self.assertEqual(verdict.stats.percentile_used, 50)
+
+
+class VolatilityAwareThresholds(unittest.TestCase):
+    """"Wait" is only advice worth giving if the price actually moves."""
+
+    def judge(self, price, past, settings):
+        return evaluate(
+            watch=make_watch(),
+            price=price,
+            history=past,
+            settings=settings,
+            currency="USD",
+            now=NOW,
+        )
+
+    def test_volatility_is_measured_robustly(self):
+        steady = [900, 902, 898, 901, 899]
+        self.assertLess(volatility_of(steady), 0.01)
+
+        swinging = [700, 1100, 800, 1200, 900]
+        self.assertGreater(volatility_of(swinging), 0.10)
+
+    def test_one_outlier_does_not_make_a_stable_fare_look_volatile(self):
+        self.assertLess(volatility_of([900, 902, 898, 901, 5000]), 0.01)
+
+    def test_too_little_history_has_no_volatility(self):
+        self.assertIsNone(volatility_of([900, 910]))
+
+    def test_a_stable_watch_keeps_the_floor(self):
+        settings = Settings(min_discount=0.02, discount_volatility_multiple=0.75)
+        self.assertAlmostEqual(required_discount(0.001, settings), 0.02)
+
+    def test_a_volatile_watch_demands_a_bigger_drop(self):
+        settings = Settings(min_discount=0.02, discount_volatility_multiple=0.75)
+        self.assertAlmostEqual(required_discount(0.20, settings), 0.15)
+
+    def test_the_bar_is_capped(self):
+        settings = Settings(max_discount=0.25, discount_volatility_multiple=0.75)
+        self.assertAlmostEqual(required_discount(0.90, settings), 0.25)
+
+    def test_turning_it_off_restores_a_flat_bar(self):
+        settings = Settings(min_discount=0.02, adaptive_discount=False)
+        self.assertAlmostEqual(required_discount(0.40, settings), 0.02)
+
+    def test_an_ordinary_dip_on_a_wild_series_does_not_alert(self):
+        settings = Settings(min_observations=3, percentile=50)
+        # Swings of ~29%: a 7% dip is just Tuesday.
+        self.assertFalse(self.judge(650, history(500, 700, 900), settings).flagged)
+
+    def test_the_same_dip_does_alert_on_a_stable_series(self):
+        settings = Settings(min_observations=3, percentile=50)
+        steady = history(900, 902, 898, 901, 899, 903)
+        self.assertTrue(self.judge(840, steady, settings).flagged)
+
+    def test_on_a_stable_fare_only_a_real_low_can_qualify(self):
+        """A worthwhile consequence, not an accident.
+
+        If a price never moves, "in the cheapest 20%" carries no information —
+        any price low enough to clear the discount bar is by then also an
+        all-time low, so that is what gets reported.
+        """
+        settings = Settings(min_observations=3, percentile=50)
+        steady = history(900, 902, 898, 901, 899, 903)
+        verdict = self.judge(840, steady, settings)
+        self.assertEqual([r.code for r in verdict.reasons], [ALL_TIME_LOW])
+
+    def test_the_reason_explains_where_the_bar_came_from(self):
+        settings = Settings(min_observations=3, percentile=50)
+        # Mild movement: 900 clears the bar without being a new low.
+        moderate = history(800, 950, 1000, 1000, 1050, 1200)
+        verdict = self.judge(900, moderate, settings)
+
+        self.assertEqual([r.code for r in verdict.reasons], [BELOW_PERCENTILE])
+        detail = verdict.reasons[0].detail
+        self.assertIn("below its median", detail)
+        self.assertIn("volatility", detail)
 
 
 class Cooldown(unittest.TestCase):

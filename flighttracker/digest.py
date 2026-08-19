@@ -197,7 +197,11 @@ def _forecast_lines(verdict: Verdict, indent: str = "  ") -> list[str]:
     if forecast is None or not getattr(forecast, "known", False):
         return []
 
-    lines = [f"{indent}outlook ({forecast.confidence} confidence): {forecast.headline}"]
+    basis = " (horizon-adjusted baseline)" if verdict.horizon_adjusted else ""
+    lines = [
+        f"{indent}outlook ({forecast.confidence} confidence){basis}: "
+        f"{forecast.headline}"
+    ]
     lines.extend(f"{indent}  - {note}" for note in forecast.notes)
     return lines
 
@@ -381,7 +385,9 @@ def _html_forecast(verdict: Verdict) -> str:
         f"<div style=\"margin:12px 0 0;padding:10px 12px;background:#f6f7f9;"
         f"border-radius:4px\">"
         f"<div style=\"font-weight:600;color:{tint};font-size:13px\">"
-        f"Outlook &middot; {escape(forecast.confidence)} confidence</div>"
+        f"Outlook &middot; {escape(forecast.confidence)} confidence"
+        f"{' &middot; horizon-adjusted baseline' if verdict.horizon_adjusted else ''}"
+        "</div>"
         f"<div style=\"margin:2px 0 0;font-size:13px\">"
         f"{escape(forecast.headline)}</div>"
         f"<ul style=\"margin:6px 0 0;padding-left:18px;color:#555;font-size:12px\">"

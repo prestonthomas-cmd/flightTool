@@ -21,10 +21,18 @@ settings:
 
   # A price at or below this percentile of the watch's own history is a signal.
   percentile: 20
-  # ...and it must also sit at least this far below the watch's median. Without
-  # it the percentile rule fires on a price that is not low at all: the 20th
-  # percentile of a price that never moves *is* that price.
+  # ...and it must also sit far enough below the watch's median to be worth an
+  # email. Without this the percentile rule fires on a price that is not low at
+  # all: the 20th percentile of a price that never moves *is* that price.
+  #
+  # The bar scales with each watch's own volatility, floored at `min_discount`
+  # and capped at `max_discount` — a fare that swings 15% should not alert on
+  # the same 2% dip that means something on a stable one. Set
+  # `adaptive_discount: false` for a flat bar.
   min_discount: 0.02
+  adaptive_discount: true
+  discount_volatility_multiple: 0.75
+  max_discount: 0.25
 
   # A watch with no *successful* lookup for this long is not being tracked, and
   # the digest and `flighttracker doctor` both say so loudly. Counts successful
@@ -60,6 +68,20 @@ settings:
   # watch alone cannot tell a horizon effect from the calendar.
   horizon_min_bucket_samples: 8
   horizon_min_watches: 2
+  # Once the curve is good enough, re-base past prices onto today's point in
+  # the booking window before judging them, so a percentile is not computed
+  # against months-old prices taken at a different distance from departure.
+  # The digest says `horizon-adjusted baseline` whenever this applies.
+  horizon_adjusted_baseline: true
+
+  # "When the price was around here before, did waiting pay?" — needs this many
+  # comparable past runs, each with this many runs after it to look at.
+  min_waiting_cases: 5
+  waiting_lookahead_runs: 5
+
+  # Departure weekday, pooled across watches. Same two-watch gate as the curve.
+  weekday_min_samples: 6
+  weekday_min_watches: 2
 
 watches:
   # A round trip with flexible dates on both ends. The two ranges would make

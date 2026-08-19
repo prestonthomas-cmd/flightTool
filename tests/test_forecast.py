@@ -166,9 +166,15 @@ class CurveSelection(unittest.TestCase):
 
 class Buckets(unittest.TestCase):
     def test_days_land_in_the_expected_bucket(self):
-        self.assertEqual(bucket_for_days(0), (0, 6))
+        self.assertEqual(bucket_for_days(0), (0, 2))
         self.assertEqual(bucket_for_days(25), (21, 29))
         self.assertEqual(bucket_for_days(200), (180, 730))
+
+    def test_edges_sit_on_the_advance_purchase_boundaries(self):
+        """Airlines write fare rules at 21, 14, 7 and 3 days out."""
+        for boundary in (3, 7, 14, 21):
+            self.assertEqual(bucket_for_days(boundary)[0], boundary)
+            self.assertEqual(bucket_for_days(boundary - 1)[1], boundary - 1)
 
     def test_a_departure_years_away_is_off_the_scale(self):
         self.assertIsNone(bucket_for_days(2000))

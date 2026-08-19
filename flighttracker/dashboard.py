@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from html import escape
 from sqlite3 import Connection
+from statistics import median as statistics_median
 from typing import Optional
 
 from .charts import Bar, Point, bar_chart, line_chart, money
@@ -344,7 +345,7 @@ def _watch_card(conn: Connection, verdict: Verdict, now: datetime) -> str:
     parts.append(_outlook(verdict))
 
     parts.append("<h3>Price history</h3>")
-    parts.append(_history_chart(history, currency, stats.median))
+    parts.append(_history_chart(history, currency))
     parts.append(_history_table(history, currency))
 
     parts.append("<h3>Dates in the latest run</h3>")
@@ -419,19 +420,33 @@ def _outlook(verdict: Verdict) -> str:
     if forecast is None or not getattr(forecast, "known", False):
         return ""
     notes = "".join(f"<li>{escape(note)}</li>" for note in forecast.notes)
+    baseline = ""
+    if verdict.horizon_adjusted:
+        baseline = (
+            ' · <span title="Past prices re-based onto today\'s point in the '
+            'booking window before judging">horizon-adjusted baseline</span>'
+        )
     return (
         f'<div class="outlook"><div class="k">Outlook · '
-        f"{escape(forecast.confidence)} confidence</div>"
+        f"{escape(forecast.confidence)} confidence{baseline}</div>"
         f'<div class="h">{escape(forecast.headline)}</div>'
         f"<ul>{notes}</ul></div>"
     )
 
 
-def _history_chart(history, currency: str, median: Optional[float]) -> str:
+def _history_chart(history, currency: str) -> str:
+    """The raw series, with a reference line drawn from that same raw series.
+
+    Deliberately not the verdict's median: that one may have been re-based onto
+    today's booking horizon, and a reference line on a different footing from
+    the points around it is worse than no line at all.
+    """
     if len(history) < 2:
         return '<p class="empty">Not enough runs yet to draw a line.</p>'
 
-    lowest = min(p.price for p in history)
+    prices = [p.price for p in history]
+    lowest = min(prices)
+    middle = float(statistics_median(prices))
     origin = parse_iso(history[0].timestamp)
     points = []
     for point in history:
@@ -453,7 +468,7 @@ def _history_chart(history, currency: str, median: Optional[float]) -> str:
     return line_chart(
         points,
         currency=currency,
-        reference=median,
+        reference=middle,
         reference_label="median",
         x_labels=labels,
     )

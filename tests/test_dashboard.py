@@ -182,6 +182,42 @@ class Rendering(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertIn("&lt;script&gt;", html)
 
+    def test_the_chart_reference_line_is_on_the_same_footing_as_its_points(self):
+        """A re-based median drawn over raw points would misread the chart."""
+        from flighttracker.dashboard import _history_chart
+        from flighttracker.store import RunPoint, to_iso
+
+        history = [
+            RunPoint(to_iso(START + timedelta(days=n)), price)
+            for n, price in enumerate([1000.0, 1200.0, 1400.0])
+        ]
+        svg = _history_chart(history, "USD")
+        # Median of the plotted points is 1200, not anything re-based.
+        self.assertIn("USD 1,200", svg)
+
+    def test_an_adjusted_baseline_is_declared_not_hidden(self):
+        """It changes the judgement, so the page has to say it happened."""
+        from unittest import mock
+        from flighttracker.dashboard import _outlook
+
+        verdict = mock.Mock(
+            horizon_adjusted=True,
+            forecast=mock.Mock(known=True, confidence="medium",
+                               headline="Prices usually fall further.", notes=()),
+        )
+        self.assertIn("horizon-adjusted baseline", _outlook(verdict))
+
+    def test_a_raw_baseline_says_nothing_extra(self):
+        from unittest import mock
+        from flighttracker.dashboard import _outlook
+
+        verdict = mock.Mock(
+            horizon_adjusted=False,
+            forecast=mock.Mock(known=True, confidence="medium",
+                               headline="Prices usually fall further.", notes=()),
+        )
+        self.assertNotIn("horizon-adjusted", _outlook(verdict))
+
     def test_a_thin_horizon_curve_explains_itself_rather_than_drawing_noise(self):
         config = make_config(make_watch("tokyo"))
         self.track(config, [900, 880], 4)

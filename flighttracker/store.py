@@ -343,3 +343,20 @@ def fares_seen(conn: sqlite3.Connection, watch_id: str) -> list[tuple[str, int, 
             (watch_id,),
         )
     ]
+
+
+def date_prices(conn: sqlite3.Connection, watch_id: str) -> list[tuple[str, str, float]]:
+    """Every stored (run, departure date, cheapest price) for one watch.
+
+    The raw material for separating "the whole window moved" from "this one
+    date got cheap", which the per-run minimum alone cannot distinguish.
+    """
+    return [
+        (row["timestamp"], row["depart_date"], row["price"])
+        for row in conn.execute(
+            "SELECT timestamp, depart_date, MIN(price) AS price FROM price_history"
+            " WHERE watch_id = ? AND depart_date IS NOT NULL"
+            " GROUP BY timestamp, depart_date ORDER BY timestamp",
+            (watch_id,),
+        )
+    ]

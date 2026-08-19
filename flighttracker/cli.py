@@ -148,6 +148,12 @@ def _parser() -> argparse.ArgumentParser:
         "--cooldown", type=float, default=None, help="override alert_cooldown_hours"
     )
     backtest.add_argument(
+        "--raw-baseline",
+        action="store_true",
+        help="judge against raw history instead of re-basing it onto the "
+        "booking window, to see what the adjustment is worth",
+    )
+    backtest.add_argument(
         "--sweep",
         action="store_true",
         help="compare several percentile thresholds side by side",
@@ -397,6 +403,8 @@ def _backtest(args) -> int:
         overrides["min_observations"] = args.min_observations
     if args.cooldown is not None:
         overrides["alert_cooldown_hours"] = args.cooldown
+    if args.raw_baseline:
+        overrides["horizon_adjusted_baseline"] = False
     if overrides:
         settings = replace(settings, **overrides)
 

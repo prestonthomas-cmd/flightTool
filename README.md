@@ -111,7 +111,7 @@ A watch is flagged when any of these hold:
   your own judgement, so it fires from the very first run.
 - **All-time low** — cheaper than every previous run for this watch.
 - **Below the percentile** — in the cheapest `percentile`% of its own history,
-  **and** at least `min_discount` (2% by default) below its median.
+  **and** far enough below its median to be worth an email.
 
 That second condition is not decoration. Being under the percentile threshold
 is not on its own evidence of anything: the 20th percentile of a price that
@@ -121,6 +121,18 @@ the threshold and alerts on every run. Replaying a stable $268 fare through the
 rule without the guard produced **6.8 alerts a month about a price that had not
 moved**; with it, 0.4. The all-time-low rule needs no such guard — it already
 demands a strict improvement on everything seen before.
+
+That bar **scales with the watch's own volatility** (`min_discount` is its
+floor, `max_discount` its ceiling). "Wait" is only advice worth giving if the
+price actually moves: a watch that swings 15% should not alert on the same 2%
+dip that means something on a stable fare. Volatility is measured as a median
+absolute deviation, so one scraped outlier cannot make a steady fare look
+wild. Set `adaptive_discount: false` for a flat bar.
+
+A consequence worth knowing: on a genuinely stable fare, any price low enough
+to clear the bar is by then also an all-time low, so that is what gets
+reported. "In the cheapest 20%" carries no information when the price does not
+move, and the tool stops pretending otherwise.
 
 The last two stay silent until the watch has `min_observations` runs behind it.
 Early on, "the cheapest price ever seen" is just "the only price ever seen";
@@ -168,6 +180,19 @@ Austin–Denver hop and a $1,400 long-haul can share a curve without one drownin
 the other — the result is an index where 100 means "what this trip normally
 costs".
 
+The bucket edges sit on the advance-purchase boundaries airlines actually
+write fare rules against — 21, 14, 7 and 3 days — so a step in price lands
+between buckets instead of being smeared across one.
+
+Once the curve is good enough it also **re-bases the history before judging
+it**: past prices are scaled by the ratio of the curve at today's horizon to
+the curve at the horizon they were taken at, so a percentile is not computed
+against months-old prices collected at a systematically different distance from
+departure. When that happens the digest and dashboard say
+`horizon-adjusted baseline` — it changes the judgement, so it is never silent.
+Set `horizon_adjusted_baseline: false` to switch it off, and use
+`backtest --raw-baseline` to measure what it is worth on your own data.
+
 A bucket only counts once it holds observations from **at least two different
 watches**. That gate matters: a single watch's price against days-to-departure
 *is* its price over time, so one watch alone cannot tell a horizon effect from
@@ -183,7 +208,46 @@ Realistically this takes a couple of months of running two or more watches. The
 watch's own route is used when that route has enough data; otherwise everything
 is pooled.
 
-**3. Sooner and further out.** Within a single run, the chosen date is compared
+**3. Did waiting pay?** The question you are actually asking. Of the past runs
+priced at a comparable point in this watch's own distribution, how many were
+followed by something cheaper, and by how much:
+
+```
+Historically, in 15 of 15 past run(s) priced around here, something cheaper
+followed — typically 26% lower.
+```
+
+It is a frequency from your own history, not a model, and it reads the same way
+when a price is high as when it is low — which is exactly when it matters most.
+Runs near the end of the series are excluded: they have barely any future to
+judge, and counting them would bias the answer towards "waiting never paid".
+
+**4. Departure weekday.** Pooled across watches and normalised the same way as
+the horizon curve, since weekday is one of the strongest fare drivers:
+
+```
+Friday departures run about 20% above Tuesday, the cheapest day (312
+observations, all watches).
+```
+
+Same two-watch gate — a single watch whose departures all fall on one weekday
+would otherwise "prove" that weekday is cheap. In practice a small watchlist
+often will not clear it, and the reading simply stays quiet.
+
+**5. This date against its own window, over time.** The within-run comparison
+below says a date is cheaper than its neighbours *today*. This says whether it
+is cheaper than it *usually* is relative to them, which is what separates a
+date-specific opportunity from the whole market moving:
+
+```
+2026-12-10 is normally 12% below the rest of its window, but today it is 28%
+below — unusually well placed against its own window (111 runs).
+```
+
+If the whole window drops 30%, this correctly reports "no better placed than
+usual" rather than calling it a deal on that date.
+
+**6. Sooner and further out.** Within a single run, the chosen date is compared
 against the other departures in the same window. This one works from the very
 first run, because the window is already being searched:
 
@@ -332,8 +396,16 @@ percentile   alerts  per month   first alert     vs best
        20%       20        5.5     USD 1,303        +43%
 ```
 
-`--percentile`, `--min-observations` and `--cooldown` override individual
-settings without touching the watchlist.
+`--percentile`, `--min-observations`, `--cooldown` and `--raw-baseline`
+override individual settings without touching the watchlist.
+
+One caveat, stated in the output too: with the horizon-adjusted baseline on,
+the curve used to re-base each replayed step is built from the whole stored
+dataset, including runs that had not happened yet at the point being replayed.
+The prices being *judged* are strictly historical, but the adjustment applied
+to them is not, so an adjusted replay flatters itself a little. Compare it
+against `--raw-baseline` to see the size of the effect, not to conclude the
+adjustment is free.
 
 **It measures the alerting rule, not the future.** A rule that looks good on one
 watch's history is not thereby a prediction; it is a description of what the
@@ -398,7 +470,9 @@ that file; credentials belong in `.env` (git-ignored) or in repository secrets.
   passengers and you are comparing against prices for a different trip. Give it
   a new `id` when the trip itself changes.
 - **The forecasts are descriptive statistics, not a model.** They summarise the
-  history in your own database. Early on that history is thin, and the tool
+  history in your own database. The defaults were tuned against simulated
+  prices, so treat them as starting points and re-check them with `backtest`
+  once you have a few weeks of real history. Early on that history is thin, and the tool
   says so rather than dressing a guess up as a prediction. Airlines also
   reprice for reasons no amount of history can see — a fare war, a schedule
   change, a competitor pulling a route.
@@ -467,7 +541,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-244 tests, under a second, no network and no dependencies beyond PyYAML — the
+282 tests, under a second, no network and no dependencies beyond PyYAML — the
 suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.

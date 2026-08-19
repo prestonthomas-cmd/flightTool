@@ -14,9 +14,10 @@ from typing import Callable, Optional, Sequence
 
 from .config import Config
 from .fetch import Failure, Fetcher, RunResult, collect
-from .forecast import build_forecast
+from .forecast import build_forecast, rebase
 from .signals import Verdict, evaluate
 from .store import (
+    horizon_samples,
     last_alert,
     observations_for_run,
     record_alerts,
@@ -92,12 +93,14 @@ def execute_run(
             ],
         )
 
+    samples = horizon_samples(conn)
     verdicts = []
     for watch in config.watches:
         best = result.cheapest(watch.id)
         # `before=timestamp` keeps this run's own price out of the history it is
         # being compared against — otherwise a new low could never be a new low.
         history = run_history(conn, watch.id, before=timestamp)
+        history, adjusted = rebase(samples, watch, history, settings, now)
         verdicts.append(
             evaluate(
                 watch=watch,
@@ -113,7 +116,7 @@ def execute_run(
                     if best and best.return_date
                     else None
                 ),
-            )
+            ).with_baseline("horizon-adjusted" if adjusted else "raw")
         )
 
     priced_rows = {
@@ -158,6 +161,7 @@ def attach_forecasts(
             best_depart=verdict.best_depart,
             run_rows=run_rows.get(verdict.watch.id, ()),
             currency=verdict.currency,
+            price=verdict.price,
         )
         annotated.append(verdict.with_forecast(forecast))
     return annotated
@@ -186,6 +190,7 @@ def evaluate_only(
     """Re-judge the most recent stored run without touching the network."""
     verdicts = []
     run_rows: dict[str, list] = {}
+    samples = horizon_samples(conn)
     for watch in config.watches:
         history = run_history(conn, watch.id)
         if not history:
@@ -200,6 +205,7 @@ def evaluate_only(
             )
             continue
         latest = history[-1]
+        earlier, adjusted = rebase(samples, watch, history[:-1], config.settings, now)
         rows = observations_for_run(conn, watch.id, latest.timestamp)
         cheapest = rows[0] if rows else None
         run_rows[watch.id] = [
@@ -209,7 +215,7 @@ def evaluate_only(
             evaluate(
                 watch=watch,
                 price=latest.price,
-                history=history[:-1],
+                history=earlier,
                 settings=config.settings,
                 currency=(cheapest["currency"] if cheapest else None)
                 or config.settings.currency,
@@ -217,6 +223,6 @@ def evaluate_only(
                 now=now,
                 best_depart=cheapest["depart_date"] if cheapest else None,
                 best_return=cheapest["return_date"] if cheapest else None,
-            )
+            ).with_baseline("horizon-adjusted" if adjusted else "raw")
         )
     return attach_forecasts(conn, config, verdicts, now, run_rows)

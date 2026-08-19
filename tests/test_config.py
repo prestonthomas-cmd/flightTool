@@ -79,6 +79,40 @@ class LoadingAWatchlist(unittest.TestCase):
         config = load_config(path)
         self.assertEqual(config.settings.db_path, self.tmp / "data/prices.db")
 
+    def test_boolean_settings_can_actually_be_set(self):
+        """Every setting defaulting to a bool must round-trip from YAML."""
+        from flighttracker.config import BOOLEAN_SETTINGS
+
+        lines = ["settings:"]
+        lines += [f"  {name}: false" for name in sorted(BOOLEAN_SETTINGS)]
+        lines += [
+            "watches:",
+            "  - id: w",
+            "    origin: JFK",
+            "    destination: LHR",
+            "    depart_date_range: 2027-01-01",
+        ]
+        path = self.tmp / "watches.yaml"
+        path.write_text("\n".join(lines) + "\n")
+
+        settings = load_config(path).settings
+        self.assertTrue(BOOLEAN_SETTINGS)
+        for name in BOOLEAN_SETTINGS:
+            self.assertIs(getattr(settings, name), False, name)
+
+    def test_a_boolean_setting_rejects_a_number(self):
+        with self.assertRaises(ConfigError) as caught:
+            load_config(write(self.tmp, """
+                settings:
+                  adaptive_discount: 0.5
+                watches:
+                  - id: w
+                    origin: JFK
+                    destination: LHR
+                    depart_date_range: 2027-01-01
+                """))
+        self.assertIn("expected true or false", str(caught.exception))
+
     def test_cabin_spellings_are_normalised(self):
         path = write(
             self.tmp,
