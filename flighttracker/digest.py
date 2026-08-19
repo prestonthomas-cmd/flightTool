@@ -158,10 +158,34 @@ def _text_block(verdict: Verdict) -> list[str]:
             f"{stats.minimum:,.0f}, median {verdict.currency} {stats.median:,.0f}, "
             f"high {verdict.currency} {stats.maximum:,.0f}"
         )
+    block.extend(_forecast_lines(verdict))
     link = _link(verdict)
     if link:
         block.append(f"  {link}")
     return block
+
+
+def _forecast_lines(verdict: Verdict, indent: str = "  ") -> list[str]:
+    """The outlook block: a headline, then the evidence behind it."""
+    forecast = verdict.forecast
+    if forecast is None or not getattr(forecast, "known", False):
+        return []
+
+    lines = [f"{indent}outlook ({forecast.confidence} confidence): {forecast.headline}"]
+    lines.extend(f"{indent}  - {note}" for note in forecast.notes)
+    return lines
+
+
+def _forecast_hint(verdict: Verdict) -> str:
+    """A few words for the compact list, or nothing."""
+    forecast = verdict.forecast
+    if forecast is None or not getattr(forecast, "known", False):
+        return ""
+    return {
+        "falling": " — usually still falling",
+        "rising": " — usually rises from here",
+        "flat": " — usually flat from here",
+    }.get(forecast.direction, "")
 
 
 def _text_summary(verdict: Verdict) -> str:
@@ -177,6 +201,7 @@ def _text_summary(verdict: Verdict) -> str:
             f" — {verdict.currency} {abs(delta):,.0f} {direction} its median "
             f"of {stats.count} runs"
         )
+    line += _forecast_hint(verdict)
     if verdict.suppressed:
         line += f" [{verdict.suppressed}]"
     return line
@@ -266,6 +291,7 @@ def _html_card(verdict: Verdict) -> str:
         f"<li>{escape(reason.detail)}</li>" for reason in verdict.reasons
     )
     stats = verdict.stats
+    forecast = _html_forecast(verdict)
     history = ""
     if stats.has_history:
         history = (
@@ -294,7 +320,30 @@ def _html_card(verdict: Verdict) -> str:
         f"{escape(verdict.currency)} {verdict.price:,.0f}</div>"
         f"<div style=\"color:#444\">{dates}</div>"
         f"<ul style=\"margin:10px 0 0;padding-left:20px\">{reasons}</ul>"
-        f"{history}{link_html}</div>"
+        f"{history}{forecast}{link_html}</div>"
+    )
+
+
+def _html_forecast(verdict: Verdict) -> str:
+    forecast = verdict.forecast
+    if forecast is None or not getattr(forecast, "known", False):
+        return ""
+
+    tint = {"falling": "#0b6fbf", "rising": "#b34700", "flat": "#555"}.get(
+        forecast.direction, "#555"
+    )
+    notes = "".join(
+        f"<li>{escape(note)}</li>" for note in forecast.notes
+    )
+    return (
+        f"<div style=\"margin:12px 0 0;padding:10px 12px;background:#f6f7f9;"
+        f"border-radius:4px\">"
+        f"<div style=\"font-weight:600;color:{tint};font-size:13px\">"
+        f"Outlook &middot; {escape(forecast.confidence)} confidence</div>"
+        f"<div style=\"margin:2px 0 0;font-size:13px\">"
+        f"{escape(forecast.headline)}</div>"
+        f"<ul style=\"margin:6px 0 0;padding-left:18px;color:#555;font-size:12px\">"
+        f"{notes}</ul></div>"
     )
 
 

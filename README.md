@@ -127,6 +127,119 @@ unless the price drops a further `alert_improvement` (3% by default). An alert
 is only recorded once the email is actually sent, so a failed send is retried
 on the next run rather than being silently swallowed.
 
+## Where the price is heading
+
+A buy signal says a price is low *today*. These three readings say what it has
+been doing and what prices like it usually do next. They appear under each
+watch in the digest and on the dashboard.
+
+**They annotate; they never gate.** Nothing here can suppress a buy signal.
+With one person's watchlist the horizon curve stays thin for months, and a weak
+forecast quietly swallowing a genuine all-time low would be the worst thing
+this tool could do. Every reading states its own sample size, and confidence
+never goes above "medium".
+
+**1. This flight's own history.** A Theil–Sen slope — the median of all
+pairwise slopes — gives the drift in dollars per week without one scraped
+outlier dragging it around. Because a robust slope is *designed* to ignore a
+few odd points, a price that sat flat for two months and then fell off a cliff
+still reads as "steady", so a step change is measured separately: the newest
+runs against the stretch before them. When there is a real step, it speaks for
+the watch instead of the drift.
+
+**2. The booking-horizon curve.** Every observation knows how many days before
+departure it was taken. Pool them by that distance and you get the shape of the
+booking window: dear far out, a trough somewhere in the middle, a sharp climb
+at the end. Each price is divided by its own watch's median first, so a $260
+Austin–Denver hop and a $1,400 long-haul can share a curve without one drowning
+the other — the result is an index where 100 means "what this trip normally
+costs".
+
+A bucket only counts once it holds observations from **at least two different
+watches**. That gate matters: a single watch's price against days-to-departure
+*is* its price over time, so one watch alone cannot tell a horizon effect from
+the calendar. Until the gate is met the tool says so rather than drawing a line
+through noise:
+
+```
+- Booking-horizon curve: not enough data yet — it needs several watches with
+  overlapping histories (have 1).
+```
+
+Realistically this takes a couple of months of running two or more watches. The
+watch's own route is used when that route has enough data; otherwise everything
+is pooled.
+
+**3. Sooner and further out.** Within a single run, the chosen date is compared
+against the other departures in the same window. This one works from the very
+first run, because the window is already being searched:
+
+```
+2026-12-10 is USD 367 below the 4 later one(s).
+```
+
+or, when nothing stands out:
+
+```
+every date in the window is within USD 40 of the others — this is route-wide
+pricing, not one cheap date
+```
+
+## Holidays
+
+Holiday travel demand tracks the *holiday*, not the calendar date: the days
+before Thanksgiving are expensive whether that falls on 26 November or the
+22nd. `flighttracker/holidays.py` computes US holidays by rule for any year —
+fixed dates, nth-weekday rules for Thanksgiving and the Monday holidays, and
+the Gregorian computus for Easter — so historic and future schedules both come
+out right, with no data file to go stale and no dependency.
+
+Each major holiday carries an asymmetric travel window (out before
+Thanksgiving, home for several days after; Christmas reaches past New Year
+because that is one trip, not two). That gets used two ways:
+
+- **Explaining a cheap date.** If the cheapest date in a window is cheap
+  because it falls outside the holiday peak, that is not a deal — it is a
+  different trip, and the digest says so:
+
+  ```
+  2026-12-10 is 14d after Thanksgiving while 2 other date(s) in the window fall
+  inside the Christmas peak — cheaper, but not the same trip.
+  ```
+
+- **Comparing across years.** A date's holiday position (`Thanksgiving, -2`)
+  means the same thing in every year, where "23 November" does not. That is
+  what makes a cross-year comparison honest.
+
+A holiday label is only applied within three weeks of the holiday. Wider than
+that and almost every date in the year gets one — at six weeks only a single
+day in 2026 came back clean, which makes the label meaningless.
+
+## The dashboard
+
+```bash
+flighttracker dashboard                       # writes site/index.html
+flighttracker dashboard --out ~/flights.html  # anywhere you like
+```
+
+One self-contained HTML file — no server, no build step, no CDN, nothing
+fetched. Open it from disk. Per watch it shows the current price against its
+median, the buy-signal state and why, the outlook above, a price-history chart,
+and the date grid for the latest run with holiday-peak dates marked. Below
+that, the pooled booking-horizon curve. It follows your system light/dark
+setting, and every chart has a hover readout and a table view underneath.
+
+The tracker rebuilds it on every run and commits it to the repo, where it stays
+private.
+
+**Publishing it is opt-in, and worth thinking about first.** A GitHub Pages
+site is public even when the repository is private — outside Enterprise Cloud
+with access control there is no middle setting. Publishing puts your watchlist,
+your dates and your prices on a public URL. `.github/workflows/pages.yml` will
+do it, but only once you both enable Pages (Settings → Pages → Source: GitHub
+Actions) and set the repository variable `PUBLISH_DASHBOARD` to `true`. Leave
+either unset and nothing is published.
+
 ## Email
 
 One digest per run, listing every flagged watch — never one email per flight.
@@ -183,6 +296,11 @@ that file; credentials belong in `.env` (git-ignored) or in repository secrets.
 - **History belongs to the watch id.** Change a watch's dates, cabin or
   passengers and you are comparing against prices for a different trip. Give it
   a new `id` when the trip itself changes.
+- **The forecasts are descriptive statistics, not a model.** They summarise the
+  history in your own database. Early on that history is thin, and the tool
+  says so rather than dressing a guess up as a prediction. Airlines also
+  reprice for reasons no amount of history can see — a fare war, a schedule
+  change, a competitor pulling a route.
 
 ## Looking at the data
 
@@ -190,6 +308,7 @@ that file; credentials belong in `.env` (git-ignored) or in repository secrets.
 flighttracker history                    # every watch, run by run
 flighttracker history nyc-to-tokyo-dec   # just one
 flighttracker signals                    # re-judge the latest stored run, no fetching
+flighttracker dashboard                  # the whole thing as one HTML page
 ```
 
 `signals` is the one to use when tuning `percentile` or `min_observations` —
@@ -214,18 +333,26 @@ WHERE watch_id = 'nyc-to-tokyo-dec' GROUP BY depart_date ORDER BY 2;
 | `fetch_errors` | lookups that failed, so gaps in the history are explainable |
 | `alerts` | what was emailed and when — this is what the cooldown reads |
 
+`price_history` also records `origin` and `destination`, which is what lets the
+horizon curve pool by route. A database written by an earlier version gains the
+columns on open — the migration is additive and never drops anything.
+
 ## Layout
 
 ```
 flighttracker/
-  config.py    watchlist parsing and validation
-  dates.py     date ranges -> the searches to actually run
-  fetch.py     the only module that knows about Google Flights
-  store.py     SQLite schema and queries
-  signals.py   percentiles, all-time lows, ceilings, the cooldown
-  digest.py    the email, text and HTML
-  run.py       one run: fetch, store, judge
-  cli.py       argument parsing and the subcommands
+  config.py     watchlist parsing and validation
+  dates.py      date ranges -> the searches to actually run
+  fetch.py      the only module that knows about Google Flights
+  store.py      SQLite schema, queries and in-place migrations
+  signals.py    percentiles, all-time lows, ceilings, the cooldown
+  holidays.py   US holidays by rule, and travel peak windows
+  forecast.py   trend, step changes, the horizon curve, neighbouring dates
+  digest.py     the email, text and HTML
+  charts.py     inline SVG line and bar charts, no dependencies
+  dashboard.py  the self-contained HTML page
+  run.py        one run: fetch, store, judge, annotate
+  cli.py        argument parsing and the subcommands
 ```
 
 ## Tests
@@ -234,10 +361,14 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-117 tests, under a second, no network and no dependencies beyond PyYAML — the
+208 tests, under a second, no network and no dependencies beyond PyYAML — the
 suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.
+
+The holiday rules are checked against published calendars for past and future
+years, and the horizon curve is checked by feeding it a known shape and
+confirming it recovers it.
 
 ## Not in v1
 

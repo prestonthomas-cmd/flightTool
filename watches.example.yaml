@@ -31,6 +31,27 @@ settings:
   alert_cooldown_hours: 48
   alert_improvement: 0.03
 
+  # --- Forecasting ----------------------------------------------------------
+  # These only affect the outlook shown beside each watch. Nothing here can
+  # suppress a buy signal.
+  #
+  # Runs before this watch's own trend line is worth drawing, and how far back
+  # that line looks.
+  min_trend_observations: 8
+  trend_window_runs: 60
+  # A step change is the newest runs against the stretch before them. A robust
+  # trend line is designed to ignore a few odd points, which means it also
+  # ignores a genuine cliff — hence measuring the step separately.
+  move_recent_runs: 5
+  move_baseline_runs: 20
+  move_threshold: 0.05
+  # The booking-horizon curve pools every watch by days-to-departure. A bucket
+  # needs this many observations from this many *different* watches: one watch's
+  # price against days-out is the same series as its price over time, so one
+  # watch alone cannot tell a horizon effect from the calendar.
+  horizon_min_bucket_samples: 8
+  horizon_min_watches: 2
+
 watches:
   # A round trip with flexible dates on both ends. The two ranges would make
   # 11 x 11 = 121 searches, so `trip_length_nights` narrows it to the trip

@@ -1,0 +1,56 @@
+name: Publish the dashboard
+
+# OPT-IN, AND DELIBERATELY SO.
+#
+# A GitHub Pages site is public even when the repository is private (outside
+# Enterprise Cloud with access control). Publishing puts your watchlist, your
+# dates and your prices on a public URL. Nothing here runs until you both:
+#
+#   1. enable Pages for this repo — Settings > Pages > Source: GitHub Actions
+#   2. set the repository variable PUBLISH_DASHBOARD to `true`
+#      (Settings > Secrets and variables > Actions > Variables)
+#
+# Without both, the tracker still builds `site/index.html` on every run and
+# commits it to the repo, where it stays private. Clone and open it.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Track flight prices"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: vars.PUBLISH_DASHBOARD == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install PyYAML
+
+      # Rebuilt from the committed database rather than trusting the committed
+      # HTML, so the published page always matches the data in the repo.
+      - run: python -m flighttracker dashboard --out site/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

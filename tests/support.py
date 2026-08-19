@@ -67,6 +67,8 @@ class StubFetcher:
             airlines=("Test Air",),
             stops=0,
             duration_minutes=780,
+            origin=watch.origin,
+            destination=watch.destination,
         )
 
 

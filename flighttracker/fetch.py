@@ -33,6 +33,8 @@ class Quote:
     airlines: tuple[str, ...] = ()
     stops: Optional[int] = None
     duration_minutes: Optional[int] = None
+    origin: Optional[str] = None
+    destination: Optional[str] = None
 
     def to_observation(self) -> Observation:
         return Observation(
@@ -44,6 +46,8 @@ class Quote:
             airlines=", ".join(self.airlines) or None,
             stops=self.stops,
             duration_minutes=self.duration_minutes,
+            origin=self.origin,
+            destination=self.destination,
         )
 
 
@@ -154,6 +158,8 @@ def _quote_from(watch, depart, back, itinerary, currency) -> Quote:
         price=float(itinerary.price),
         currency=currency,
         airlines=airlines,
+        origin=watch.origin,
+        destination=watch.destination,
         # Segments cover the itinerary Google prices on the results page; for a
         # round trip that is the outbound leg, the return being chosen later.
         stops=max(len(segments) - 1, 0) if segments else None,

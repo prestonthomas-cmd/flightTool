@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS price_history (
   return_date  TEXT,
   airlines     TEXT,
   stops        INTEGER,
-  duration_minutes INTEGER
+  duration_minutes INTEGER,
+  origin       TEXT,
+  destination  TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS price_history_run_leg
@@ -54,7 +56,17 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 
 CREATE INDEX IF NOT EXISTS alerts_watch_time ON alerts (watch_id, timestamp);
+
+CREATE INDEX IF NOT EXISTS price_history_route
+  ON price_history (origin, destination);
 """
+
+# Columns added after the first release. A database written by an older version
+# is upgraded in place on open, so an existing price history is never lost to a
+# schema change.
+LATER_COLUMNS = {
+    "price_history": {"origin": "TEXT", "destination": "TEXT"},
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,22 @@ class Observation:
     airlines: Optional[str] = None
     stops: Optional[int] = None
     duration_minutes: Optional[int] = None
+    # Denormalised from the watch so the forecast can pool observations by
+    # route without needing the watchlist that produced them.
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class HorizonSample:
+    """One observation, reduced to what the booking-horizon curve needs."""
+
+    watch_id: str
+    origin: Optional[str]
+    destination: Optional[str]
+    observed_on: str
+    depart_date: str
+    price: float
 
 
 @dataclass(frozen=True)
@@ -110,8 +138,25 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    migrate(conn)
     conn.commit()
     return conn
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Add any columns a database written by an older version is missing."""
+    added = []
+    for table, columns in LATER_COLUMNS.items():
+        present = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        for name, kind in columns.items():
+            if name not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+                added.append(f"{table}.{name}")
+    if added:
+        conn.commit()
+    return added
 
 
 def record_observations(
@@ -129,6 +174,8 @@ def record_observations(
             o.airlines,
             o.stops,
             o.duration_minutes,
+            o.origin,
+            o.destination,
         )
         for o in observations
     ]
@@ -139,15 +186,17 @@ def record_observations(
             """
             INSERT INTO price_history
               (watch_id, timestamp, price, currency, depart_date, return_date,
-               airlines, stops, duration_minutes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               airlines, stops, duration_minutes, origin, destination)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (watch_id, timestamp, depart_date, IFNULL(return_date, ''))
             DO UPDATE SET
               price = excluded.price,
               currency = excluded.currency,
               airlines = excluded.airlines,
               stops = excluded.stops,
-              duration_minutes = excluded.duration_minutes
+              duration_minutes = excluded.duration_minutes,
+              origin = excluded.origin,
+              destination = excluded.destination
             """,
             rows,
         )
@@ -236,3 +285,29 @@ def observations_for_run(
             (watch_id, timestamp),
         )
     )
+
+
+def horizon_samples(conn: sqlite3.Connection) -> list[HorizonSample]:
+    """Every stored price, reduced to what the booking-horizon curve needs."""
+    return [
+        HorizonSample(
+            watch_id=row["watch_id"],
+            origin=row["origin"],
+            destination=row["destination"],
+            observed_on=row["timestamp"],
+            depart_date=row["depart_date"],
+            price=row["price"],
+        )
+        for row in conn.execute(
+            "SELECT watch_id, origin, destination, timestamp, depart_date, price"
+            " FROM price_history WHERE depart_date IS NOT NULL"
+        )
+    ]
+
+
+def latest_run(conn: sqlite3.Connection, watch_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT MAX(timestamp) AS t FROM price_history WHERE watch_id = ?",
+        (watch_id,),
+    ).fetchone()
+    return row["t"] if row and row["t"] else None

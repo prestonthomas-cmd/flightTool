@@ -15,3 +15,6 @@ venv/
 build/
 dist/
 .DS_Store
+
+# The dashboard is rebuilt from the database on every run; the workflow commits
+# it so a private repo carries a readable copy.

@@ -44,7 +44,13 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python -m flighttracker run
 
-      - name: Commit the price history
+      - name: Rebuild the dashboard
+        # Written into the repo, not published. Publishing is a separate,
+        # opt-in workflow — see .github/workflows/pages.yml.
+        if: always()
+        run: python -m flighttracker dashboard --out site/index.html
+
+      - name: Commit the price history and dashboard
         # Runs even when the fetch step failed, so the recorded errors and any
         # prices that did come back are not lost with the runner.
         if: always()
@@ -56,10 +62,10 @@ jobs:
             echo "No data directory — the run never got as far as writing."
             exit 0
           fi
-          # `git add` first: on the very first run the database is untracked,
-          # which a plain `git diff` would not notice.
-          git add -A data/
-          if git diff --cached --quiet -- data/; then
+          # `git add` first: on the very first run these are untracked, which a
+          # plain `git diff` would not notice.
+          git add -A data/ site/ 2>/dev/null || git add -A data/
+          if git diff --cached --quiet; then
             echo "No change to the price history."
             exit 0
           fi

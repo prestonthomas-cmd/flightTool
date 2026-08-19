@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .config import Config, Settings, load_config
+from .dashboard import render_document
 from .dates import describe
 from .digest import (
     EmailNotConfigured,
@@ -97,6 +98,17 @@ def _parser() -> argparse.ArgumentParser:
         "signals", help="re-judge the latest stored run without fetching"
     )
     signals.set_defaults(handler=_signals)
+
+    dashboard = sub.add_parser(
+        "dashboard", help="write a self-contained HTML dashboard"
+    )
+    dashboard.add_argument(
+        "--out",
+        type=Path,
+        default=Path("site/index.html"),
+        help="where to write it (default: site/index.html)",
+    )
+    dashboard.set_defaults(handler=_dashboard)
 
     test_email = sub.add_parser("test-email", help="send a sample digest")
     test_email.set_defaults(handler=_test_email)
@@ -267,6 +279,17 @@ def _signals(args) -> int:
     conn = connect(config.settings.db_path)
     verdicts = evaluate_only(config, conn, utc_now())
     print(render_text(utc_now(), verdicts, []))
+    return EXIT_OK
+
+
+def _dashboard(args) -> int:
+    config = _load(args)
+    conn = connect(config.settings.db_path)
+    html = render_document(conn, config, utc_now())
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(html)
+    print(f"Wrote {args.out} ({len(html):,} bytes).")
     return EXIT_OK
 
 

@@ -7,7 +7,7 @@ and a cheap one does not stay silent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from statistics import fmean, median
 from typing import Optional, Sequence
@@ -75,6 +75,12 @@ class Verdict:
     suppressed: Optional[str] = None
     best_depart: Optional[str] = None
     best_return: Optional[str] = None
+    # Filled in after the fact by `run.attach_forecasts`: where the price looks
+    # to be heading. Never changes whether the watch is flagged.
+    forecast: object = None
+
+    def with_forecast(self, forecast) -> "Verdict":
+        return replace(self, forecast=forecast)
 
     @property
     def flagged(self) -> bool:
@@ -190,16 +196,7 @@ def evaluate(
 def _with_note(verdict: Verdict, note: Optional[str]) -> Verdict:
     if note is None:
         return verdict
-    return Verdict(
-        watch=verdict.watch,
-        price=verdict.price,
-        currency=verdict.currency,
-        stats=verdict.stats,
-        reasons=verdict.reasons,
-        suppressed=note,
-        best_depart=verdict.best_depart,
-        best_return=verdict.best_return,
-    )
+    return replace(verdict, suppressed=note)
 
 
 def _cooldown(

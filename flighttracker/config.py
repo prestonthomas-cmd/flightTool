@@ -70,6 +70,22 @@ class Settings:
     # below the last alerted price is worth another email.
     alert_improvement: float = 0.03
 
+    # --- Forecasting ---------------------------------------------------------
+    # Runs of history before a watch's own trend line is worth drawing.
+    min_trend_observations: int = 8
+    # The trend reads the most recent runs only, so a months-old price cannot
+    # keep dragging the slope around.
+    trend_window_runs: int = 60
+    # A booking-horizon bucket needs this many observations, from this many
+    # distinct watches, before it is allowed into the curve.
+    horizon_min_bucket_samples: int = 8
+    horizon_min_watches: int = 2
+    # A step change is measured as the newest runs against the stretch before
+    # them, reported once it clears `move_threshold`.
+    move_recent_runs: int = 5
+    move_baseline_runs: int = 20
+    move_threshold: float = 0.05
+
     @property
     def resolved_db_path(self) -> Path:
         return self.db_path
@@ -192,7 +208,17 @@ def _parse_settings(raw: Any, problems: list[str], source: Path) -> Settings:
         problems.append("settings.percentile: should be between 0 and 100 exclusive")
         values.pop("percentile")
 
-    for key in ("min_observations", "max_retries", "max_combinations"):
+    for key in (
+        "min_observations",
+        "max_retries",
+        "max_combinations",
+        "min_trend_observations",
+        "trend_window_runs",
+        "horizon_min_bucket_samples",
+        "horizon_min_watches",
+        "move_recent_runs",
+        "move_baseline_runs",
+    ):
         if key in values and values[key] < 1:
             problems.append(f"settings.{key}: should be at least 1")
             values.pop(key)
@@ -211,7 +237,17 @@ def _coerce_setting(key: str, value: Any, source: Path):
         if not re.fullmatch(r"[A-Z]{3}", text):
             raise ValueError(f"expected a 3-letter currency code, got {value!r}")
         return text
-    if key in {"min_observations", "max_retries", "max_combinations"}:
+    if key in {
+        "min_observations",
+        "max_retries",
+        "max_combinations",
+        "min_trend_observations",
+        "trend_window_runs",
+        "horizon_min_bucket_samples",
+        "horizon_min_watches",
+        "move_recent_runs",
+        "move_baseline_runs",
+    }:
         return _as_int(value)
     return _as_float(value)
 

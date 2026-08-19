@@ -14,6 +14,7 @@ from typing import Callable, Optional, Sequence
 
 from .config import Config
 from .fetch import Failure, Fetcher, RunResult, collect
+from .forecast import build_forecast
 from .signals import Verdict, evaluate
 from .store import (
     last_alert,
@@ -115,6 +116,14 @@ def execute_run(
             )
         )
 
+    priced_rows = {
+        watch.id: [
+            (q.depart_date.isoformat(), q.price) for q in result.for_watch(watch.id)
+        ]
+        for watch in config.watches
+    }
+    verdicts = attach_forecasts(conn, config, verdicts, now, priced_rows)
+
     return RunOutcome(
         timestamp=timestamp,
         when=now,
@@ -122,6 +131,36 @@ def execute_run(
         failures=result.failures,
         stored=stored,
     )
+
+
+def attach_forecasts(
+    conn: Connection,
+    config: Config,
+    verdicts: Sequence[Verdict],
+    now: datetime,
+    run_rows: Optional[dict] = None,
+) -> list[Verdict]:
+    """Annotate each verdict with where its price looks to be heading.
+
+    Deliberately a separate pass over finished verdicts: a forecast can never
+    reach back and change whether something was flagged.
+    """
+    run_rows = run_rows or {}
+    annotated = []
+    for verdict in verdicts:
+        history = run_history(conn, verdict.watch.id, before=to_iso(now))
+        forecast = build_forecast(
+            conn,
+            verdict.watch,
+            history,
+            config.settings,
+            now,
+            best_depart=verdict.best_depart,
+            run_rows=run_rows.get(verdict.watch.id, ()),
+            currency=verdict.currency,
+        )
+        annotated.append(verdict.with_forecast(forecast))
+    return annotated
 
 
 def commit_alerts(conn: Connection, outcome: RunOutcome) -> int:
@@ -146,6 +185,7 @@ def evaluate_only(
 ) -> Sequence[Verdict]:
     """Re-judge the most recent stored run without touching the network."""
     verdicts = []
+    run_rows: dict[str, list] = {}
     for watch in config.watches:
         history = run_history(conn, watch.id)
         if not history:
@@ -162,6 +202,9 @@ def evaluate_only(
         latest = history[-1]
         rows = observations_for_run(conn, watch.id, latest.timestamp)
         cheapest = rows[0] if rows else None
+        run_rows[watch.id] = [
+            (row["depart_date"], row["price"]) for row in rows if row["depart_date"]
+        ]
         verdicts.append(
             evaluate(
                 watch=watch,
@@ -176,4 +219,4 @@ def evaluate_only(
                 best_return=cheapest["return_date"] if cheapest else None,
             )
         )
-    return verdicts
+    return attach_forecasts(conn, config, verdicts, now, run_rows)
