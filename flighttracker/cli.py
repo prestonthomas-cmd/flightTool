@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -17,9 +18,12 @@ from .digest import (
     render_text,
     send,
 )
+from .backtest import format_result, format_sweep, run_backtest, sweep
 from .env import load_env_file
 from .errors import ConfigError, FlightTrackerError
 from .fetch import GoogleFlightsFetcher
+from .health import check as check_health
+from .health import summarize as summarize_health
 from .run import commit_alerts, evaluate_only, execute_run
 from .store import connect, parse_iso, run_history, utc_now
 
@@ -29,6 +33,7 @@ EXIT_OK = 0
 EXIT_CONFIG = 2
 EXIT_RUN_FAILED = 3
 EXIT_EMAIL_FAILED = 4
+EXIT_STALE = 5
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -83,6 +88,11 @@ def _parser() -> argparse.ArgumentParser:
         help="send the digest even when nothing is flagged",
     )
     run.add_argument("--quiet", action="store_true", help="only print the summary")
+    run.add_argument(
+        "--fail-if-stale",
+        action="store_true",
+        help="exit non-zero when a watch has stopped being tracked, so cron mails you",
+    )
     run.add_argument("--proxy", default=None, help="proxy for the scraper")
     run.set_defaults(handler=_run)
 
@@ -112,6 +122,37 @@ def _parser() -> argparse.ArgumentParser:
 
     test_email = sub.add_parser("test-email", help="send a sample digest")
     test_email.set_defaults(handler=_test_email)
+
+    doctor = sub.add_parser(
+        "doctor", help="check the tool is still collecting usable prices"
+    )
+    doctor.add_argument(
+        "--live",
+        action="store_true",
+        help="also run one real lookup, to prove the scraper still works",
+    )
+    doctor.add_argument("--proxy", default=None, help="proxy for the live check")
+    doctor.set_defaults(handler=_doctor)
+
+    backtest = sub.add_parser(
+        "backtest", help="replay stored history against an alerting rule"
+    )
+    backtest.add_argument("watch_id", nargs="?", help="limit to one watch")
+    backtest.add_argument(
+        "--percentile", type=float, default=None, help="override the threshold"
+    )
+    backtest.add_argument(
+        "--min-observations", type=int, default=None, help="override the warm-up"
+    )
+    backtest.add_argument(
+        "--cooldown", type=float, default=None, help="override alert_cooldown_hours"
+    )
+    backtest.add_argument(
+        "--sweep",
+        action="store_true",
+        help="compare several percentile thresholds side by side",
+    )
+    backtest.set_defaults(handler=_backtest)
 
     return parser
 
@@ -163,8 +204,10 @@ def _run(args) -> int:
         config, conn, fetcher, now, on_event=note, persist=not args.dry_run
     )
 
+    concerns = check_health(conn, config, now)
+
     note("")
-    note(render_text(outcome.when, outcome.verdicts, outcome.failures))
+    note(render_text(outcome.when, outcome.verdicts, outcome.failures, concerns))
 
     if not outcome.priced and outcome.failures:
         print(
@@ -176,11 +219,16 @@ def _run(args) -> int:
     if args.dry_run:
         return EXIT_OK
 
+    blocking = [c for c in concerns if c.blocking]
+
     if args.no_email:
         commit_alerts(conn, outcome)
-        return EXIT_OK
+        return EXIT_STALE if (blocking and args.fail_if_stale) else EXIT_OK
 
-    should_send = bool(outcome.flagged) or args.always_email
+    # A watch that has stopped being tracked always earns an email. The prices
+    # you are not seeing are the ones that can cost you, and a tracker that
+    # fails silently is the failure this tool most needs to avoid.
+    should_send = bool(outcome.flagged) or bool(blocking) or args.always_email
     if not should_send:
         note("Nothing flagged — no email sent (use --always-email to send anyway).")
         return EXIT_OK
@@ -191,7 +239,9 @@ def _run(args) -> int:
         print(f"Email not configured: {exc}", file=sys.stderr)
         return EXIT_EMAIL_FAILED
 
-    message = build_message(smtp, outcome.when, outcome.verdicts, outcome.failures)
+    message = build_message(
+        smtp, outcome.when, outcome.verdicts, outcome.failures, concerns
+    )
     try:
         send(smtp, message)
     except OSError as exc:
@@ -202,7 +252,7 @@ def _run(args) -> int:
 
     commit_alerts(conn, outcome)
     note(f"Digest sent to {', '.join(smtp.recipients)}.")
-    return EXIT_OK
+    return EXIT_STALE if (blocking and args.fail_if_stale) else EXIT_OK
 
 
 def _validate(args) -> int:
@@ -279,6 +329,100 @@ def _signals(args) -> int:
     conn = connect(config.settings.db_path)
     verdicts = evaluate_only(config, conn, utc_now())
     print(render_text(utc_now(), verdicts, []))
+    return EXIT_OK
+
+
+def _doctor(args) -> int:
+    """A health check meant for cron: `flighttracker doctor || mail me`."""
+    config = _load(args)
+    conn = connect(config.settings.db_path)
+    concerns = check_health(conn, config, utc_now())
+
+    print(summarize_health(concerns))
+    for concern in concerns:
+        print(f"  {'!!' if concern.blocking else '- '} {concern.message}")
+
+    broken = False
+    if args.live:
+        broken = not _live_check(config, args.proxy)
+
+    if broken or any(c.blocking for c in concerns):
+        return EXIT_STALE
+    return EXIT_OK
+
+
+def _live_check(config: Config, proxy: Optional[str]) -> bool:
+    """One real lookup, so a broken scraper is found before a watch goes stale.
+
+    Staleness takes a day or more to show up. This says so immediately, which
+    is what makes it worth running on its own schedule.
+    """
+    watch = config.watches[0]
+    depart, back = watch.searches()[0]
+    print()
+    print(f"Live check: {watch.route} on {depart}...")
+
+    fetcher = make_fetcher(config.settings.currency, proxy)
+    try:
+        quote = fetcher.fetch(watch, depart, back)
+    except Exception as exc:  # noqa: BLE001 - the scraper raises freely
+        print(
+            f"  FAILED — {type(exc).__name__}: {exc}\n"
+            "  The scraper could not reach or parse Google Flights. If this "
+            "keeps happening, `fast-flights` most likely needs updating.",
+            file=sys.stderr,
+        )
+        return False
+
+    if quote is None:
+        print(
+            "  FAILED — the request worked but no priced itinerary came back, "
+            "which usually means the page layout changed.",
+            file=sys.stderr,
+        )
+        return False
+
+    print(f"  OK — {quote.currency} {quote.price:,.0f}")
+    return True
+
+
+def _backtest(args) -> int:
+    config = _load(args)
+    settings = config.settings
+
+    overrides = {}
+    if args.percentile is not None:
+        overrides["percentile"] = args.percentile
+    if args.min_observations is not None:
+        overrides["min_observations"] = args.min_observations
+    if args.cooldown is not None:
+        overrides["alert_cooldown_hours"] = args.cooldown
+    if overrides:
+        settings = replace(settings, **overrides)
+
+    conn = connect(settings.db_path)
+    watches = [w for w in config.watches if not args.watch_id or w.id == args.watch_id]
+    if args.watch_id and not watches:
+        print(f"No watch named {args.watch_id!r} in {config.source}.", file=sys.stderr)
+        return EXIT_CONFIG
+
+    print("Replaying stored history through the same rule a real run uses.")
+    print("This measures the alerting rule, not the future.")
+    print()
+
+    for watch in watches:
+        if args.sweep:
+            print(f"{watch.name}  [{watch.id}]")
+            for line in format_sweep(
+                sweep(conn, watch, settings), settings.currency
+            ):
+                print(f"  {line}")
+        else:
+            for line in format_result(
+                run_backtest(conn, watch, settings), settings.currency
+            ):
+                print(line)
+        print()
     return EXIT_OK
 
 

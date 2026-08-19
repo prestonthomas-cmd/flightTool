@@ -1,0 +1,27 @@
+name: Scraper canary
+
+# Google Flights scraping breaks without warning, and staleness takes a day or
+# more to surface. This does one real lookup on its own schedule, so a broken
+# scraper announces itself on a failed workflow rather than through a watch
+# that quietly stopped collecting.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # Runner IPs are blocked by Google far more often than home ones, so a
+      # failure here is worth confirming locally before assuming the parser
+      # broke.
+      - run: python -m flighttracker doctor --live

@@ -125,6 +125,39 @@ class BuySignals(unittest.TestCase):
         self.assertIsNone(verdict.price)
         self.assertIn("no price returned", verdict.suppressed)
 
+    def test_a_price_that_never_moves_does_not_alert_every_run(self):
+        """The 20th percentile of a flat series is the series itself.
+
+        Found by the backtest: the rule fired on an entirely ordinary price on
+        every run, because `price <= threshold` is trivially true when the
+        distribution has no spread.
+        """
+        verdict = self.judge(900, history(900, 900, 900, 900, 900))
+        self.assertFalse(verdict.flagged)
+
+    def test_one_old_outlier_does_not_make_the_modal_price_cheap(self):
+        """With ties, the threshold lands on the price everything else sits at."""
+        verdict = self.judge(1000, history(400, 1000, 1000, 1000, 1000, 1000, 1000))
+        self.assertFalse(verdict.flagged)
+
+    def test_a_barely_below_median_price_is_not_worth_an_email(self):
+        settings = Settings(min_observations=3, percentile=50, min_discount=0.02)
+        verdict = self.judge(699, history(500, 700, 900), settings=settings)
+        self.assertFalse(verdict.flagged)
+
+    def test_a_real_discount_still_alerts_at_a_high_percentile(self):
+        """The guard must not quietly disable percentiles near the median."""
+        settings = Settings(min_observations=3, percentile=50, min_discount=0.02)
+        verdict = self.judge(650, history(500, 700, 900), settings=settings)
+        self.assertTrue(verdict.flagged)
+        self.assertEqual([r.code for r in verdict.reasons], [BELOW_PERCENTILE])
+
+    def test_an_all_time_low_is_unaffected_by_the_discount_guard(self):
+        settings = Settings(min_observations=3, min_discount=0.50)
+        verdict = self.judge(899, history(900, 900, 900, 900, 900), settings=settings)
+        self.assertTrue(verdict.flagged)
+        self.assertEqual([r.code for r in verdict.reasons], [ALL_TIME_LOW])
+
     def test_per_watch_overrides_beat_the_global_settings(self):
         watch = make_watch(min_observations=2, percentile=50)
         verdict = self.judge(650, history(500, 700, 900), watch=watch)

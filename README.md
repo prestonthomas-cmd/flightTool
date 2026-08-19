@@ -87,6 +87,9 @@ watches:
 | `max_price_alert` | optional hard ceiling; alerts on its own, with no history needed |
 | `passengers` | a number of adults, or `{adults, children, infants_in_seat, infants_on_lap}` |
 | `max_stops` | `0` for nonstop only |
+| `exclude_basic_economy` | defaults to **true** — see below |
+| `carry_on_bags`, `checked_bags` | bag fees included in the priced total |
+| `hide_separate_and_self_transfer` | drop separate-ticket itineraries |
 | `min_observations`, `percentile` | per-watch overrides of the global settings |
 
 **Date ranges multiply.** An 11-day departure window against an 11-day return
@@ -107,7 +110,17 @@ A watch is flagged when any of these hold:
 - **Under your ceiling** — the price is at or below `max_price_alert`. This is
   your own judgement, so it fires from the very first run.
 - **All-time low** — cheaper than every previous run for this watch.
-- **Below the percentile** — in the cheapest `percentile`% of its own history.
+- **Below the percentile** — in the cheapest `percentile`% of its own history,
+  **and** at least `min_discount` (2% by default) below its median.
+
+That second condition is not decoration. Being under the percentile threshold
+is not on its own evidence of anything: the 20th percentile of a price that
+never moves *is* that price, and a history carrying one old outlier puts the
+threshold on the modal price. In both cases a completely ordinary price clears
+the threshold and alerts on every run. Replaying a stable $268 fare through the
+rule without the guard produced **6.8 alerts a month about a price that had not
+moved**; with it, 0.4. The all-time-low rule needs no such guard — it already
+demands a strict improvement on everything seen before.
 
 The last two stay silent until the watch has `min_observations` runs behind it.
 Early on, "the cheapest price ever seen" is just "the only price ever seen";
@@ -240,6 +253,93 @@ do it, but only once you both enable Pages (Settings → Pages → Source: GitHu
 Actions) and set the repository variable `PUBLISH_DASHBOARD` to `true`. Leave
 either unset and nothing is published.
 
+## Comparing like with like
+
+A basic-economy fare and a regular one are different purchases, so a history
+that mixes them makes the percentile compare prices that were never comparable.
+Two things guard against that.
+
+`exclude_basic_economy` **defaults to true**, so what gets tracked is a fare you
+would plausibly book. Set it to `false` if you do buy basic economy — just be
+consistent, because the point is the comparison basis, not which basis you pick.
+
+More usefully, every stored price carries a signature of what it actually
+bought — cabin, stops, passengers, bags, fare exclusions. So a change is
+*detectable* after the fact rather than merely avoidable in advance:
+
+```
+$ flighttracker doctor
+- NYC to Tokyo, December: 47 of 60 stored prices were collected under different
+  search settings (bags 0/0 -> 0/2) — those are a different product, so
+  comparisons against them are not like for like. Give the watch a new id to
+  start a clean history.
+```
+
+## Knowing it still works
+
+A tracker that quietly stops tracking is worse than no tracker, because you
+carry on believing you are covered. Three things make that loud.
+
+**Staleness.** A watch with no *successful* price for `stale_after_hours` (30 by
+default) is reported at the top of the digest and by `doctor`. Note that this
+counts successful lookups, not runs — a run that fails every lookup does not
+reset the clock, which was the whole gap.
+
+**`flighttracker doctor`.** A health check that exits non-zero when something is
+wrong, so cron can mail you:
+
+```cron
+0 8 * * * cd /path/to/flight-price-tracker && .venv/bin/flighttracker doctor || true
+```
+
+`doctor --live` also performs one real lookup, which catches a broken scraper
+immediately rather than waiting a day for staleness to show up.
+`.github/workflows/canary.yml` runs exactly that, weekly.
+
+**A digest that always goes out when something is broken.** Critical concerns
+send an email even when nothing is flagged, and `run --fail-if-stale` exits
+non-zero so a scheduled run fails visibly. The tracking workflow uses it.
+
+## Tuning the rule
+
+`percentile` and `min_observations` are guesses until you measure them. The
+backtest replays your stored history through the *same* decision code a real run
+uses — nothing can see a price that had not happened yet — and reports what the
+rule would have done:
+
+```
+$ flighttracker backtest nyc-to-tokyo-dec
+NYC to Tokyo, December  [nyc-to-tokyo-dec]
+  111 runs over 110 days · low USD 914 · median USD 1,314 · latest USD 948
+  would have sent 20 alert(s) · about 5.5 a month
+  first at 2026-06-14 for USD 1,303 (below_percentile)
+  buying on that first alert would have been USD 389 (43%) above the best it
+  ever saw, USD 914 on 2026-08-17
+```
+
+The last line is the one that matters: an alerting rule is only worth having if
+the price it puts in front of you is close to the best the watch ever saw.
+
+`--sweep` compares thresholds side by side, so the choice is made from evidence
+rather than taste:
+
+```
+$ flighttracker backtest nyc-to-tokyo-dec --sweep
+percentile   alerts  per month   first alert     vs best
+----------  -------  ---------  ------------  ----------
+       10%       13        3.5     USD 1,296        +42%
+       15%       16        4.4     USD 1,296        +42%
+       20%       20        5.5     USD 1,303        +43%
+```
+
+`--percentile`, `--min-observations` and `--cooldown` override individual
+settings without touching the watchlist.
+
+**It measures the alerting rule, not the future.** A rule that looks good on one
+watch's history is not thereby a prediction; it is a description of what the
+rule would have done, which is the honest and useful thing to know. It is also
+how the flat-series bug above was found.
+
 ## Email
 
 One digest per run, listing every flagged watch — never one email per flight.
@@ -282,7 +382,8 @@ that file; credentials belong in `.env` (git-ignored) or in repository secrets.
 - **Scraping breaks.** Google Flights has no SLA and no contract with you. A
   layout change can stop this working with no warning. Everything that touches
   `fast_flights` is confined to `flighttracker/fetch.py`, so a fix is a small
-  one, but it will occasionally need one.
+  one, but it will occasionally need one. `doctor --live` and the weekly canary
+  exist to make that failure loud instead of silent.
 - **Data-centre IPs get blocked far more than home ones.** This is the main
   reason to prefer cron on your own machine or a small VPS over GitHub Actions.
   If runs start failing in CI but work locally, that is what has happened.
@@ -309,6 +410,8 @@ flighttracker history                    # every watch, run by run
 flighttracker history nyc-to-tokyo-dec   # just one
 flighttracker signals                    # re-judge the latest stored run, no fetching
 flighttracker dashboard                  # the whole thing as one HTML page
+flighttracker doctor                     # is it still collecting usable prices?
+flighttracker backtest --sweep           # what would this rule have done?
 ```
 
 `signals` is the one to use when tuning `percentile` or `min_observations` —
@@ -334,7 +437,8 @@ WHERE watch_id = 'nyc-to-tokyo-dec' GROUP BY depart_date ORDER BY 2;
 | `alerts` | what was emailed and when — this is what the cooldown reads |
 
 `price_history` also records `origin` and `destination`, which is what lets the
-horizon curve pool by route. A database written by an earlier version gains the
+horizon curve pool by route, and `fare`, the signature of what each price
+actually bought. A database written by an earlier version gains the
 columns on open — the migration is additive and never drops anything.
 
 ## Layout
@@ -346,6 +450,8 @@ flighttracker/
   fetch.py      the only module that knows about Google Flights
   store.py      SQLite schema, queries and in-place migrations
   signals.py    percentiles, all-time lows, ceilings, the cooldown
+  health.py     staleness and fare-signature checks
+  backtest.py   replaying stored history through the alerting rule
   holidays.py   US holidays by rule, and travel peak windows
   forecast.py   trend, step changes, the horizon curve, neighbouring dates
   digest.py     the email, text and HTML
@@ -361,7 +467,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-208 tests, under a second, no network and no dependencies beyond PyYAML — the
+244 tests, under a second, no network and no dependencies beyond PyYAML — the
 suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.

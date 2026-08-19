@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS price_history (
   stops        INTEGER,
   duration_minutes INTEGER,
   origin       TEXT,
-  destination  TEXT
+  destination  TEXT,
+  fare         TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS price_history_run_leg
@@ -65,7 +66,7 @@ CREATE INDEX IF NOT EXISTS price_history_route
 # is upgraded in place on open, so an existing price history is never lost to a
 # schema change.
 LATER_COLUMNS = {
-    "price_history": {"origin": "TEXT", "destination": "TEXT"},
+    "price_history": {"origin": "TEXT", "destination": "TEXT", "fare": "TEXT"},
 }
 
 
@@ -85,6 +86,8 @@ class Observation:
     # route without needing the watchlist that produced them.
     origin: Optional[str] = None
     destination: Optional[str] = None
+    # What this price actually buys — see `Watch.fare_signature`.
+    fare: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +179,7 @@ def record_observations(
             o.duration_minutes,
             o.origin,
             o.destination,
+            o.fare,
         )
         for o in observations
     ]
@@ -186,8 +190,8 @@ def record_observations(
             """
             INSERT INTO price_history
               (watch_id, timestamp, price, currency, depart_date, return_date,
-               airlines, stops, duration_minutes, origin, destination)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               airlines, stops, duration_minutes, origin, destination, fare)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (watch_id, timestamp, depart_date, IFNULL(return_date, ''))
             DO UPDATE SET
               price = excluded.price,
@@ -196,7 +200,8 @@ def record_observations(
               stops = excluded.stops,
               duration_minutes = excluded.duration_minutes,
               origin = excluded.origin,
-              destination = excluded.destination
+              destination = excluded.destination,
+              fare = excluded.fare
             """,
             rows,
         )
@@ -311,3 +316,30 @@ def latest_run(conn: sqlite3.Connection, watch_id: str) -> Optional[str]:
         (watch_id,),
     ).fetchone()
     return row["t"] if row and row["t"] else None
+
+
+def last_success(conn: sqlite3.Connection, watch_id: str) -> Optional[str]:
+    """When this watch last produced a price, as opposed to merely being run."""
+    row = conn.execute(
+        "SELECT MAX(timestamp) AS t FROM price_history WHERE watch_id = ?",
+        (watch_id,),
+    ).fetchone()
+    return row["t"] if row and row["t"] else None
+
+
+def fares_seen(conn: sqlite3.Connection, watch_id: str) -> list[tuple[str, int, str]]:
+    """Every fare signature stored for a watch: (signature, rows, last seen).
+
+    More than one row here means the history mixes products, and the statistics
+    built on it are comparing prices that were never comparable.
+    """
+    return [
+        (row["fare"], row["rows"], row["last_seen"])
+        for row in conn.execute(
+            "SELECT IFNULL(fare, '') AS fare, COUNT(*) AS rows,"
+            " MAX(timestamp) AS last_seen FROM price_history"
+            " WHERE watch_id = ? GROUP BY IFNULL(fare, '')"
+            " ORDER BY last_seen DESC",
+            (watch_id,),
+        )
+    ]

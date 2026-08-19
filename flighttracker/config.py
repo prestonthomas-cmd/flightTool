@@ -63,12 +63,23 @@ class Settings:
     # against. Below this only a `max_price_alert` ceiling can fire.
     min_observations: int = 20
     percentile: float = 20.0
+    # How far below a watch's own median a price has to sit before "cheap"
+    # means anything. Without this the percentile rule fires on a price that is
+    # not low at all: on a flat series the 20th percentile *equals* the median,
+    # and on a series with one old outlier the threshold sits at the modal
+    # price, so an entirely ordinary price satisfies "in the cheapest 20%".
+    min_discount: float = 0.02
     max_combinations: int = 60
     alert_cooldown_hours: float = 48.0
     # A price that keeps sitting at its all-time low would otherwise alert every
     # single run. Within the cooldown, only a drop of at least this fraction
     # below the last alerted price is worth another email.
     alert_improvement: float = 0.03
+
+    # A watch with no successful lookup for this long is not being tracked, and
+    # the digest says so. A tracker that quietly stops is worse than none, since
+    # you carry on believing you are covered.
+    stale_after_hours: float = 30.0
 
     # --- Forecasting ---------------------------------------------------------
     # Runs of history before a watch's own trend line is worth drawing.
@@ -106,6 +117,13 @@ class Watch:
     label: Optional[str] = None
     min_observations: Optional[int] = None
     percentile: Optional[float] = None
+    # What is actually being priced. These change the product, not just the
+    # search, so a history collected under different values is not comparable —
+    # see `fare_signature`.
+    exclude_basic_economy: bool = True
+    carry_on_bags: int = 0
+    checked_bags: int = 0
+    hide_separate_and_self_transfer: bool = False
 
     @property
     def one_way(self) -> bool:
@@ -123,6 +141,30 @@ class Watch:
     def searches(self) -> list[DateCombination]:
         return combinations(
             self.depart_dates, self.return_dates, self.trip_length_nights
+        )
+
+    def fare_signature(self) -> str:
+        """A stable description of what a price for this watch actually buys.
+
+        Recorded against every observation. A basic-economy fare and a regular
+        one are different products, so a history that silently mixes them makes
+        the percentile compare things that were never comparable. Storing the
+        signature means a change is *detectable* rather than merely avoidable.
+        """
+        stops = "any" if self.max_stops is None else str(self.max_stops)
+        people = (
+            f"{self.passengers.adults}a{self.passengers.children}c"
+            f"{self.passengers.infants_in_seat}i{self.passengers.infants_on_lap}l"
+        )
+        return "|".join(
+            [
+                f"cabin:{self.cabin}",
+                f"stops:{stops}",
+                f"pax:{people}",
+                f"bags:{self.carry_on_bags}/{self.checked_bags}",
+                f"xbe:{int(self.exclude_basic_economy)}",
+                f"hst:{int(self.hide_separate_and_self_transfer)}",
+            ]
         )
 
     def threshold_percentile(self, settings: Settings) -> float:
@@ -300,6 +342,10 @@ def _parse_watch(
         "label",
         "min_observations",
         "percentile",
+        "exclude_basic_economy",
+        "carry_on_bags",
+        "checked_bags",
+        "hide_separate_and_self_transfer",
     }
     for key in raw:
         if key not in known:
@@ -377,6 +423,27 @@ def _parse_watch(
         except ValueError as exc:
             problems.append(f"{where}.percentile: {exc}")
 
+    flags = {}
+    for key in ("exclude_basic_economy", "hide_separate_and_self_transfer"):
+        if raw.get(key) is not None:
+            if not isinstance(raw[key], bool):
+                problems.append(f"{where}.{key}: expected true or false")
+            else:
+                flags[key] = raw[key]
+
+    bags = {}
+    for key in ("carry_on_bags", "checked_bags"):
+        if raw.get(key) is not None:
+            try:
+                count = _as_int(raw[key])
+            except ValueError as exc:
+                problems.append(f"{where}.{key}: {exc}")
+                continue
+            if count < 0:
+                problems.append(f"{where}.{key}: cannot be negative")
+                continue
+            bags[key] = count
+
     label = raw.get("label")
     if label is not None and not isinstance(label, str):
         problems.append(f"{where}.label: should be text")
@@ -399,6 +466,8 @@ def _parse_watch(
         label=label,
         min_observations=min_obs,
         percentile=percentile,
+        **flags,
+        **bags,
     )
 
     searches = watch.searches()

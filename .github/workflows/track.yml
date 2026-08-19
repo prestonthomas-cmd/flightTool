@@ -42,7 +42,9 @@ jobs:
           SMTP_SECURITY: ${{ secrets.SMTP_SECURITY }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-        run: python -m flighttracker run
+        # --fail-if-stale turns a watch that has silently stopped collecting
+        # into a failed workflow, which is the notification you actually want.
+        run: python -m flighttracker run --fail-if-stale
 
       - name: Rebuild the dashboard
         # Written into the repo, not published. Publishing is a separate,

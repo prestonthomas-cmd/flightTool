@@ -35,6 +35,7 @@ class Quote:
     duration_minutes: Optional[int] = None
     origin: Optional[str] = None
     destination: Optional[str] = None
+    fare: Optional[str] = None
 
     def to_observation(self) -> Observation:
         return Observation(
@@ -48,6 +49,7 @@ class Quote:
             duration_minutes=self.duration_minutes,
             origin=self.origin,
             destination=self.destination,
+            fare=self.fare,
         )
 
 
@@ -127,6 +129,10 @@ class GoogleFlightsFetcher:
             ),
             currency=self.currency,
             max_stops=watch.max_stops,
+            carry_on_bags=watch.carry_on_bags,
+            checked_bags=watch.checked_bags,
+            exclude_basic_economy=watch.exclude_basic_economy,
+            hide_separate_and_self_transfer=watch.hide_separate_and_self_transfer,
         )
 
         results = get_flights(query, proxy=self.proxy)

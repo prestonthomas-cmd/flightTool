@@ -21,6 +21,15 @@ settings:
 
   # A price at or below this percentile of the watch's own history is a signal.
   percentile: 20
+  # ...and it must also sit at least this far below the watch's median. Without
+  # it the percentile rule fires on a price that is not low at all: the 20th
+  # percentile of a price that never moves *is* that price.
+  min_discount: 0.02
+
+  # A watch with no *successful* lookup for this long is not being tracked, and
+  # the digest and `flighttracker doctor` both say so loudly. Counts successful
+  # lookups, not runs: a run that fails every lookup does not reset the clock.
+  stale_after_hours: 30
 
   # Refuse a watch whose date ranges expand past this many searches — every
   # combination is a separate scrape on every run.
@@ -77,6 +86,11 @@ watches:
     max_stops: 0
     passengers:
       adults: 2
+    # These change what is being priced, so they are part of the comparison
+    # basis. Changing one mid-history makes the old prices incomparable, and
+    # `doctor` will tell you so. `exclude_basic_economy` defaults to true.
+    checked_bags: 1
+    hide_separate_and_self_transfer: true
 
   # One-way: leave out `return_date_range`. This one alerts sooner and on a
   # looser threshold than the global defaults.

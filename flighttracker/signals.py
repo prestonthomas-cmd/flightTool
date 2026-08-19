@@ -159,7 +159,11 @@ def evaluate(
                     f"previous best of {currency} {stats.minimum:,.0f}",
                 )
             )
-        elif stats.threshold is not None and price <= stats.threshold:
+        elif (
+            stats.threshold is not None
+            and price <= stats.threshold
+            and _is_materially_cheap(price, stats, settings)
+        ):
             reasons.append(
                 Reason(
                     BELOW_PERCENTILE,
@@ -191,6 +195,25 @@ def evaluate(
 
     hold = _cooldown(verdict, settings, last, now)
     return _with_note(verdict, hold) if hold else verdict
+
+
+def _is_materially_cheap(price: float, stats: Stats, settings: Settings) -> bool:
+    """Is this price actually below what the watch normally costs?
+
+    Being under the percentile threshold is not enough on its own. A flat
+    series puts its 20th percentile exactly on its median, and a series
+    carrying one old outlier puts the threshold on its modal price — in both
+    cases a completely ordinary price clears the threshold and would alert on
+    every run. Requiring a real discount against the median fixes both, and
+    unlike a test on the threshold it does not quietly disable higher
+    percentile settings, where threshold and median legitimately converge.
+
+    The all-time-low rule needs no such guard: it already demands a strict
+    improvement on everything seen before.
+    """
+    if not stats.median:
+        return False
+    return price <= stats.median * (1 - settings.min_discount)
 
 
 def _with_note(verdict: Verdict, note: Optional[str]) -> Verdict:

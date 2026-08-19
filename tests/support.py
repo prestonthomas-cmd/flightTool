@@ -69,6 +69,7 @@ class StubFetcher:
             duration_minutes=780,
             origin=watch.origin,
             destination=watch.destination,
+            fare=watch.fare_signature(),
         )
 
 

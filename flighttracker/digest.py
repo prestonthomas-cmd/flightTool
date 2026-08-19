@@ -14,6 +14,7 @@ from typing import Optional, Sequence
 
 from .errors import FlightTrackerError
 from .fetch import Failure, search_url
+from .health import Concern
 from .signals import Verdict
 
 
@@ -79,7 +80,21 @@ class SmtpConfig:
         )
 
 
-def subject_for(flagged: Sequence[Verdict], failures: Sequence[Failure]) -> str:
+def subject_for(
+    flagged: Sequence[Verdict],
+    failures: Sequence[Failure],
+    concerns: Sequence[Concern] = (),
+) -> str:
+    # A watch that has stopped being tracked outranks any price news: the
+    # prices you are not seeing are the ones that can cost you.
+    blocking = [c for c in concerns if c.blocking]
+    if blocking and not flagged:
+        return f"Flight tracker: {len(blocking)} watch(es) NOT being tracked"
+    if blocking and flagged:
+        return (
+            f"{len(flagged)} buy signal(s) — and {len(blocking)} watch(es) not "
+            "being tracked"
+        )
     if flagged:
         cheapest = min(flagged, key=lambda v: v.price if v.price is not None else 0)
         if len(flagged) == 1:
@@ -97,7 +112,10 @@ def subject_for(flagged: Sequence[Verdict], failures: Sequence[Failure]) -> str:
 
 
 def render_text(
-    when: datetime, verdicts: Sequence[Verdict], failures: Sequence[Failure]
+    when: datetime,
+    verdicts: Sequence[Verdict],
+    failures: Sequence[Failure],
+    concerns: Sequence[Concern] = (),
 ) -> str:
     flagged = [v for v in verdicts if v.flagged]
     others = [v for v in verdicts if not v.flagged]
@@ -106,6 +124,14 @@ def render_text(
         f"Flight price check — {when:%Y-%m-%d %H:%M UTC}",
         "",
     ]
+
+    if concerns:
+        lines.append("!! NEEDS ATTENTION")
+        lines.append("=" * 40)
+        for concern in concerns:
+            mark = "!!" if concern.blocking else " -"
+            lines.append(f"{mark} {concern.message}")
+        lines.append("")
 
     if flagged:
         lines.append(f"BUY SIGNALS ({len(flagged)})")
@@ -225,7 +251,10 @@ def _link(verdict: Verdict) -> Optional[str]:
 
 
 def render_html(
-    when: datetime, verdicts: Sequence[Verdict], failures: Sequence[Failure]
+    when: datetime,
+    verdicts: Sequence[Verdict],
+    failures: Sequence[Failure],
+    concerns: Sequence[Concern] = (),
 ) -> str:
     flagged = [v for v in verdicts if v.flagged]
     others = [v for v in verdicts if not v.flagged]
@@ -236,6 +265,19 @@ def render_html(
         f"<p style=\"color:#666;margin:0 0 18px\">Flight price check — "
         f"{escape(when.strftime('%Y-%m-%d %H:%M UTC'))}</p>",
     ]
+
+    if concerns:
+        items = "".join(
+            f"<li><strong>{escape(c.message)}</strong></li>" if c.blocking
+            else f"<li>{escape(c.message)}</li>"
+            for c in concerns
+        )
+        parts.append(
+            "<div style=\"border:1px solid #f0c0c0;border-left:4px solid #c0392b;"
+            "border-radius:6px;padding:12px 16px;margin:0 0 18px;background:#fdf5f5\">"
+            "<div style=\"font-weight:700;color:#a12b2b\">Needs attention</div>"
+            f"<ul style=\"margin:8px 0 0;padding-left:20px\">{items}</ul></div>"
+        )
 
     if flagged:
         parts.append(
@@ -352,15 +394,18 @@ def build_message(
     when: datetime,
     verdicts: Sequence[Verdict],
     failures: Sequence[Failure],
+    concerns: Sequence[Concern] = (),
 ) -> EmailMessage:
     flagged = [v for v in verdicts if v.flagged]
     message = EmailMessage()
-    message["Subject"] = subject_for(flagged, failures)
+    message["Subject"] = subject_for(flagged, failures, concerns)
     message["From"] = config.sender
     message["To"] = ", ".join(config.recipients)
     message["Date"] = formatdate(localtime=True)
-    message.set_content(render_text(when, verdicts, failures))
-    message.add_alternative(render_html(when, verdicts, failures), subtype="html")
+    message.set_content(render_text(when, verdicts, failures, concerns))
+    message.add_alternative(
+        render_html(when, verdicts, failures, concerns), subtype="html"
+    )
     return message
 
 
