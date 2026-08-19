@@ -1,0 +1,298 @@
+"""Command line entry point: `python -m flighttracker ...`."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Optional, Sequence
+
+from .config import Config, Settings, load_config
+from .dates import describe
+from .digest import (
+    EmailNotConfigured,
+    SmtpConfig,
+    build_message,
+    render_text,
+    send,
+)
+from .env import load_env_file
+from .errors import ConfigError, FlightTrackerError
+from .fetch import GoogleFlightsFetcher
+from .run import commit_alerts, evaluate_only, execute_run
+from .store import connect, parse_iso, run_history, utc_now
+
+DEFAULT_CONFIG = "watches.yaml"
+
+EXIT_OK = 0
+EXIT_CONFIG = 2
+EXIT_RUN_FAILED = 3
+EXIT_EMAIL_FAILED = 4
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+
+    load_env_file(args.env_file)
+
+    try:
+        return args.handler(args)
+    except ConfigError as exc:
+        print(f"Watchlist problems:\n{exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    except FlightTrackerError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_RUN_FAILED
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="flighttracker",
+        description="Track cash prices for specific flights and email a buy signal.",
+    )
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        type=Path,
+        help=f"watchlist file (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
+        "--db", type=Path, default=None, help="override the database path"
+    )
+    parser.add_argument(
+        "--env-file", type=Path, default=Path(".env"), help="env file to read"
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="fetch prices, store them, email any signals")
+    run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the digest instead of sending it, and write nothing to the database",
+    )
+    run.add_argument("--no-email", action="store_true", help="store results, skip email")
+    run.add_argument(
+        "--always-email",
+        action="store_true",
+        help="send the digest even when nothing is flagged",
+    )
+    run.add_argument("--quiet", action="store_true", help="only print the summary")
+    run.add_argument("--proxy", default=None, help="proxy for the scraper")
+    run.set_defaults(handler=_run)
+
+    validate = sub.add_parser("validate", help="check the watchlist and show the plan")
+    validate.set_defaults(handler=_validate)
+
+    history = sub.add_parser("history", help="print stored price history")
+    history.add_argument("watch_id", nargs="?", help="limit to one watch")
+    history.add_argument("--limit", type=int, default=30, help="rows per watch")
+    history.set_defaults(handler=_history)
+
+    signals = sub.add_parser(
+        "signals", help="re-judge the latest stored run without fetching"
+    )
+    signals.set_defaults(handler=_signals)
+
+    test_email = sub.add_parser("test-email", help="send a sample digest")
+    test_email.set_defaults(handler=_test_email)
+
+    return parser
+
+
+def _load(args) -> Config:
+    config = load_config(args.config)
+    if args.db is not None:
+        config = Config(
+            settings=_with_db(config.settings, args.db),
+            watches=config.watches,
+            source=config.source,
+        )
+    return config
+
+
+def _with_db(settings: Settings, db_path: Path) -> Settings:
+    values = {
+        name: getattr(settings, name) for name in Settings.__dataclass_fields__
+    }
+    values["db_path"] = db_path
+    return Settings(**values)
+
+
+def make_fetcher(currency: str, proxy: Optional[str]):
+    """The seam the tests replace so no test ever reaches Google Flights."""
+    return GoogleFlightsFetcher(currency=currency, proxy=proxy)
+
+
+def _run(args) -> int:
+    config = _load(args)
+    settings = config.settings
+
+    def note(message: str) -> None:
+        if not args.quiet:
+            print(message, flush=True)
+
+    if args.dry_run:
+        note("Dry run: nothing will be written and no email will be sent.")
+        note(
+            "History still comes from the real database, so these are the signals "
+            "a real run would produce."
+        )
+
+    conn = connect(settings.db_path)
+    fetcher = make_fetcher(settings.currency, args.proxy)
+    now = utc_now()
+
+    outcome = execute_run(
+        config, conn, fetcher, now, on_event=note, persist=not args.dry_run
+    )
+
+    note("")
+    note(render_text(outcome.when, outcome.verdicts, outcome.failures))
+
+    if not outcome.priced and outcome.failures:
+        print(
+            f"Every lookup failed ({len(outcome.failures)} of them) — nothing stored.",
+            file=sys.stderr,
+        )
+        return EXIT_RUN_FAILED
+
+    if args.dry_run:
+        return EXIT_OK
+
+    if args.no_email:
+        commit_alerts(conn, outcome)
+        return EXIT_OK
+
+    should_send = bool(outcome.flagged) or args.always_email
+    if not should_send:
+        note("Nothing flagged — no email sent (use --always-email to send anyway).")
+        return EXIT_OK
+
+    try:
+        smtp = SmtpConfig.from_env()
+    except EmailNotConfigured as exc:
+        print(f"Email not configured: {exc}", file=sys.stderr)
+        return EXIT_EMAIL_FAILED
+
+    message = build_message(smtp, outcome.when, outcome.verdicts, outcome.failures)
+    try:
+        send(smtp, message)
+    except OSError as exc:
+        # The alerts stay unrecorded, so the next run retries them rather than
+        # treating an undelivered signal as already seen.
+        print(f"Sending the digest failed: {exc}", file=sys.stderr)
+        return EXIT_EMAIL_FAILED
+
+    commit_alerts(conn, outcome)
+    note(f"Digest sent to {', '.join(smtp.recipients)}.")
+    return EXIT_OK
+
+
+def _validate(args) -> int:
+    config = _load(args)
+    settings = config.settings
+    total = 0
+
+    print(f"{config.source}: {len(config.watches)} watch(es)")
+    print(f"database: {settings.db_path}")
+    print(f"currency: {settings.currency}")
+    print()
+
+    for watch in config.watches:
+        searches = watch.searches()
+        total += len(searches)
+        print(f"{watch.name}  [{watch.id}]")
+        print(f"  {watch.route}, {watch.cabin}, {watch.passengers.total} passenger(s)")
+        print(f"  {len(searches)} search(es): {_preview(searches)}")
+        ceiling = (
+            f"{settings.currency} {watch.max_price_alert:,.0f}"
+            if watch.max_price_alert is not None
+            else "none"
+        )
+        print(
+            f"  alerts: ceiling {ceiling}, bottom "
+            f"{watch.threshold_percentile(settings):g}% after "
+            f"{watch.required_observations(settings)} runs"
+        )
+        print()
+
+    spacing = settings.request_delay_seconds + settings.request_jitter_seconds / 2
+    print(f"{total} search(es) per run, roughly {total * spacing / 60:.1f} min of scraping")
+    return EXIT_OK
+
+
+def _preview(searches, limit: int = 3) -> str:
+    shown = ", ".join(describe(s) for s in searches[:limit])
+    if len(searches) > limit:
+        shown += f", ... (+{len(searches) - limit})"
+    return shown
+
+
+def _history(args) -> int:
+    config = _load(args)
+    conn = connect(config.settings.db_path)
+    watches = [w for w in config.watches if not args.watch_id or w.id == args.watch_id]
+    if args.watch_id and not watches:
+        print(f"No watch named {args.watch_id!r} in {config.source}.", file=sys.stderr)
+        return EXIT_CONFIG
+
+    for watch in watches:
+        points = run_history(conn, watch.id)
+        print(f"{watch.name}  [{watch.id}]  {watch.route}")
+        if not points:
+            print("  no observations yet")
+            print()
+            continue
+        for point in points[-args.limit :]:
+            when = parse_iso(point.timestamp)
+            print(
+                f"  {when:%Y-%m-%d %H:%M}  {config.settings.currency} "
+                f"{point.price:>9,.0f}"
+            )
+        prices = [p.price for p in points]
+        print(
+            f"  {len(points)} runs — low {min(prices):,.0f}, high {max(prices):,.0f}"
+        )
+        print()
+    return EXIT_OK
+
+
+def _signals(args) -> int:
+    config = _load(args)
+    conn = connect(config.settings.db_path)
+    verdicts = evaluate_only(config, conn, utc_now())
+    print(render_text(utc_now(), verdicts, []))
+    return EXIT_OK
+
+
+def _test_email(args) -> int:
+    config = _load(args)
+    conn = connect(config.settings.db_path)
+    verdicts = list(evaluate_only(config, conn, utc_now()))
+
+    try:
+        smtp = SmtpConfig.from_env()
+    except EmailNotConfigured as exc:
+        print(f"Email not configured: {exc}", file=sys.stderr)
+        return EXIT_EMAIL_FAILED
+
+    when = utc_now()
+    message = build_message(smtp, when, verdicts, [])
+    message["Subject"] = "[test] " + str(message["Subject"])
+    try:
+        send(smtp, message)
+    except OSError as exc:
+        print(f"Sending failed: {exc}", file=sys.stderr)
+        return EXIT_EMAIL_FAILED
+
+    print(f"Test digest sent to {', '.join(smtp.recipients)}.")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

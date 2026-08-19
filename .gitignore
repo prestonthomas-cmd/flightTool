@@ -1,0 +1,17 @@
+# Your credentials stay out of git.
+.env
+.env.*
+!.env.example
+
+# `watches.yaml` IS committed: the scheduled GitHub Action needs it in the repo,
+# and so does the price database it appends to. Keep the repo private if your
+# travel plans are not public. Nothing secret belongs in either file.
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.DS_Store

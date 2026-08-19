@@ -1,0 +1,74 @@
+name: Track flight prices
+
+on:
+  # 07:00 and 19:00 UTC. GitHub evaluates cron in UTC with no DST adjustment,
+  # and busy runners can delay a scheduled job by several minutes — neither
+  # matters for a tool sampling prices twice a day.
+  schedule:
+    - cron: "0 7,19 * * *"
+  workflow_dispatch:
+
+# The price history is committed back to the repo, which is also what keeps the
+# schedule alive: GitHub disables scheduled workflows after 60 days without
+# repository activity.
+permissions:
+  contents: write
+
+# Two overlapping runs would write the same rows and then race to push.
+concurrency:
+  group: track-flight-prices
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Fetch prices and send any signals
+        env:
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SECURITY: ${{ secrets.SMTP_SECURITY }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python -m flighttracker run
+
+      - name: Commit the price history
+        # Runs even when the fetch step failed, so the recorded errors and any
+        # prices that did come back are not lost with the runner.
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name "flight-price-tracker"
+          git config user.email "actions@github.com"
+          if [ ! -d data ]; then
+            echo "No data directory — the run never got as far as writing."
+            exit 0
+          fi
+          # `git add` first: on the very first run the database is untracked,
+          # which a plain `git diff` would not notice.
+          git add -A data/
+          if git diff --cached --quiet -- data/; then
+            echo "No change to the price history."
+            exit 0
+          fi
+          git commit -m "Prices for $(date -u '+%Y-%m-%d %H:%M UTC')"
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Push attempt ${attempt} failed; retrying."
+            sleep $((attempt * 5))
+          done
+          echo "Could not push the price history." >&2
+          exit 1
