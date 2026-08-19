@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Price Watch</title>
+</head>
+<body>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --chip: rgba(11, 11, 11, 0.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --good: #0ca30c;
+    --critical: #d03b3b;
+    --chip: rgba(255, 255, 255, 0.06);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --chip: rgba(255, 255, 255, 0.06);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 28px 20px 64px;
+  background: var(--page);
+  color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 860px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+h3 { font-size: 13px; margin: 22px 0 8px; color: var(--ink-2); font-weight: 600; }
+.sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px 20px;
+  margin: 0 0 16px;
+}
+/* State is carried by the stripe as well as the pill, so a card wanting
+   attention reads at a glance without stopping to read the label. */
+.card.flagged { border-left: 3px solid var(--good); }
+.card.stale { border-left: 3px solid var(--critical); }
+
+.summary {
+  display: grid; gap: 10px; margin: 0 0 22px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.summary .tile { background: var(--surface); }
+.summary .v { font-size: 22px; }
+.card-head {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  align-items: baseline; justify-content: space-between;
+}
+.route { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+
+.pill {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--chip); color: var(--ink-2);
+  white-space: nowrap;
+}
+.pill.buy { background: var(--good); border-color: transparent; color: #fff; }
+
+.tiles {
+  display: grid; gap: 10px; margin: 16px 0 0;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+.tile {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+}
+.tile .k {
+  font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tile .v { font-size: 20px; font-weight: 650; margin-top: 2px; }
+.tile .v.sm { font-size: 15px; font-weight: 600; }
+.tile .d { font-size: 12px; color: var(--ink-2); }
+.tile .d.down { color: var(--good); }
+.tile .d.up { color: var(--critical); }
+
+.reasons { margin: 14px 0 0; padding-left: 18px; }
+.reasons li { margin: 2px 0; }
+
+.outlook {
+  margin: 14px 0 0; padding: 12px 14px; border-radius: 8px;
+  background: var(--chip); border: 1px solid var(--border);
+}
+.outlook .k {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.outlook .h { font-weight: 600; margin: 2px 0 0; }
+.outlook ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink-2); font-size: 13px; }
+
+.chart { width: 100%; height: auto; display: block; margin: 6px 0 0; overflow: visible; }
+.grid { stroke: var(--grid); stroke-width: 1; }
+.axis { stroke: var(--axis); stroke-width: 1; }
+.reference { stroke: var(--axis); stroke-width: 1; stroke-dasharray: 4 4; }
+.reference-label { fill: var(--muted); }
+.tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.value { fill: var(--ink-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.series { fill: none; stroke: var(--series-1); stroke-width: 2;
+          stroke-linejoin: round; stroke-linecap: round; }
+.marker { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+.marker.highlight { fill: var(--good); }
+.bar { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+.bar.series-2 { fill: var(--series-2); }
+.hit { fill: transparent; }
+.hit:hover { fill: var(--chip); }
+.bar:hover { opacity: 0.82; }
+
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 0;
+          font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.swatch.s1 { background: var(--series-1); }
+.swatch.s2 { background: var(--series-2); }
+
+.empty { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+details { margin: 12px 0 0; }
+summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0 0; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border);
+         font-variant-numeric: tabular-nums; }
+th { color: var(--muted); font-weight: 600; }
+.scroll { overflow-x: auto; }
+a { color: var(--series-1); }
+:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { #tip { transition: none; } }
+footer { color: var(--muted); font-size: 12px; margin: 28px 0 0; }
+
+#tip {
+  position: fixed; pointer-events: none; opacity: 0; transition: opacity .08s;
+  background: var(--ink); color: var(--page); padding: 6px 9px;
+  border-radius: 6px; font-size: 12px; max-width: 280px; z-index: 9;
+}
+</style>
+<div class="wrap">
+<h1>Flight Price Watch</h1>
+<p class="sub">Last checked 19 Aug 2026, 20:06 UTC</p>
+<div class="summary"><div class="tile"><div class="k">Watches</div><div class="v">3</div></div><div class="tile"><div class="k">Buy signals</div><div class="v">None</div><div class="d">nothing flagged</div></div></div>
+<section class="card stale"><div class="card-head"><div><h2>NYC to Tokyo, December</h2><p class="route">JFK &lt;-&gt; HND · economy · 1 passenger(s)</p></div><span class="pill">No price</span></div><div class="tiles"><div class="tile"><div class="k">Current</div><div class="v">—</div></div><div class="tile"><div class="k">Best dates</div><div class="v"><span class="sm">—</span></div></div></div><p class="empty">no price returned this run</p><h3>Price history</h3><p class="empty">Not enough runs yet to draw a line.</p><h3>Dates in the latest run</h3><p class="empty">No priced dates stored yet.</p></section>
+<section class="card stale"><div class="card-head"><div><h2>SF to Lisbon, spring</h2><p class="route">SFO &lt;-&gt; LIS · premium-economy · 2 passenger(s)</p></div><span class="pill">No price</span></div><div class="tiles"><div class="tile"><div class="k">Current</div><div class="v">—</div></div><div class="tile"><div class="k">Best dates</div><div class="v"><span class="sm">—</span></div></div></div><p class="empty">no price returned this run</p><h3>Price history</h3><p class="empty">Not enough runs yet to draw a line.</p><h3>Dates in the latest run</h3><p class="empty">No priced dates stored yet.</p></section>
+<section class="card stale"><div class="card-head"><div><h2>austin-to-denver-ski</h2><p class="route">AUS -&gt; DEN · economy · 1 passenger(s)</p></div><span class="pill">No price</span></div><div class="tiles"><div class="tile"><div class="k">Current</div><div class="v">—</div></div><div class="tile"><div class="k">Best dates</div><div class="v"><span class="sm">—</span></div></div></div><p class="empty">no price returned this run</p><h3>Price history</h3><p class="empty">Not enough runs yet to draw a line.</p><h3>Dates in the latest run</h3><p class="empty">No priced dates stored yet.</p></section>
+<section class="card"><h2>Booking-horizon curve</h2><p class="empty">Not enough data yet. This curve pools every watch to show what prices typically do as departure approaches, and a bucket only counts once it holds observations from at least 2 different watches — one watch alone cannot tell a horizon effect from the calendar.</p></section>
+<footer>Prices are scraped from Google Flights and are a snapshot, not a quote. Forecasts are descriptive statistics over the history in this database — they annotate a price, they never decide it.</footer>
+</div><div id="tip"></div>
+<script>
+(function () {
+  var tip = document.getElementById('tip');
+  document.addEventListener('mousemove', function (event) {
+    var target = event.target.closest('[data-tip]');
+    if (!target) { tip.style.opacity = 0; return; }
+    tip.textContent = target.getAttribute('data-tip');
+    tip.style.opacity = 1;
+    var box = tip.getBoundingClientRect();
+    var x = Math.min(event.clientX + 14, window.innerWidth - box.width - 8);
+    var y = Math.max(event.clientY - box.height - 10, 8);
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  });
+})();
+</script>
+</body>
+</html>
