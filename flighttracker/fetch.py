@@ -20,6 +20,12 @@ from .dates import DateCombination, describe, iso
 from .errors import FetchError
 from .store import Observation
 
+# Errors that cannot possibly come good on a retry, and that will hit every
+# other search in the run identically. A missing dependency is the case that
+# proved this: one broken import turned into 105 attempts over twelve minutes,
+# with the real message buried under the noise.
+PERMANENT = (ImportError,)
+
 
 @dataclass(frozen=True)
 class Quote:
@@ -204,6 +210,12 @@ def collect(
             except FetchError as exc:
                 note(f"  {describe(combination)}: {exc}")
                 failures.append(Failure(watch.id, depart, back, str(exc)))
+                if exc.permanent:
+                    note(
+                        "  this affects every search in the run — stopping "
+                        "rather than repeating it"
+                    )
+                    return RunResult(tuple(quotes), tuple(failures))
                 continue
             if quote is None:
                 message = "no priced itinerary returned"
@@ -236,6 +248,10 @@ def _with_retries(
     for attempt in range(1, attempts + 1):
         try:
             return fetcher.fetch(watch, depart, back)
+        except PERMANENT as exc:
+            raise FetchError(
+                f"{type(exc).__name__}: {exc}", permanent=True
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - the scraper raises freely
             last_error = exc
             if attempt == attempts:

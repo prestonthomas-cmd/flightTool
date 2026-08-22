@@ -6,9 +6,15 @@ name: Publish the dashboard
 # Enterprise Cloud with access control there is no middle setting. Publishing
 # puts your watchlist, your dates and your prices on a guessable public URL.
 #
-# To publish once:
-#   Actions > "Publish the dashboard" > Run workflow.
-#   That single click enables Pages for the repo and deploys.
+# BEFORE THE FIRST RUN, enable Pages by hand — once:
+#   Settings > Pages > Build and deployment > Source: GitHub Actions
+#
+# The workflow asks to enable it automatically, but the Actions token is not
+# always permitted to create a Pages site, and on this repository it is not:
+# the first attempt failed with "Create Pages site failed. Error: Resource not
+# accessible by integration". Enabling it by hand is a one-time step.
+#
+# Then, to publish:  Actions > "Publish the dashboard" > Run workflow.
 #
 # To publish after every tracking run:
 #   set the repository variable PUBLISH_DASHBOARD to `true`
@@ -61,8 +67,23 @@ jobs:
       # HTML, so the published page always matches the data in the repo.
       - run: python -m flighttracker dashboard --out site/index.html
 
-      # `enablement` turns Pages on for the repository the first time this
-      # runs, so publishing takes one click rather than a trip through Settings.
+      # Printed immediately above the failure it explains, because the raw
+      # error from configure-pages says nothing about what to actually do.
+      - name: If the next step fails, read this
+        run: |
+          echo "If the next step fails with 'Resource not accessible by"
+          echo "integration' or 'Not Found', Pages is not enabled for this"
+          echo "repository and this token cannot enable it. Do it by hand, once:"
+          echo "  Settings > Pages > Build and deployment > Source: GitHub Actions"
+          echo
+          echo "If that page offers no such option, Pages is not available for a"
+          echo "private repository on this account's plan. The alternatives are to"
+          echo "upgrade the plan, or to make the repository public — which also"
+          echo "publishes the source and the entire price history, not just the"
+          echo "dashboard."
+
+      # Asks to enable Pages automatically. Harmless where the token is allowed
+      # to; where it is not, the message above says what to do instead.
       - uses: actions/configure-pages@v5
         with:
           enablement: true

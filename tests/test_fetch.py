@@ -126,6 +126,59 @@ class Collecting(unittest.TestCase):
         self.assertEqual(len(fetcher.calls), 2)
 
 
+class PermanentFailures(unittest.TestCase):
+    """A broken dependency cost 105 attempts over twelve minutes in CI."""
+
+    def setUp(self):
+        self.settings = Settings(
+            request_delay_seconds=0, request_jitter_seconds=0,
+            retry_backoff_seconds=5, max_retries=3,
+        )
+        self.rng = random.Random(0)
+
+    def watches(self):
+        return [
+            make_watch(
+                "many",
+                depart=(date(2026, 12, 10), date(2026, 12, 11), date(2026, 12, 12)),
+                returns=(date(2026, 12, 24),),
+            ),
+            make_watch("other", origin="SFO", destination="LIS"),
+        ]
+
+    def test_a_missing_dependency_is_not_retried(self):
+        fetcher = StubFetcher(errors={"many": ModuleNotFoundError("no typing_extensions")})
+        waits = Recorder()
+        collect(self.watches(), fetcher, self.settings, sleep=waits, rng=self.rng)
+
+        self.assertEqual(len(fetcher.calls), 1)
+        self.assertEqual(waits.waits, [])
+
+    def test_the_run_stops_rather_than_repeating_the_same_failure(self):
+        fetcher = StubFetcher(errors={"many": ImportError("boom")})
+        result = collect(self.watches(), fetcher, self.settings,
+                         sleep=Recorder(), rng=self.rng)
+
+        # One failure reported, not one per search across every watch.
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(len(fetcher.calls), 1)
+
+    def test_the_message_names_the_real_cause(self):
+        fetcher = StubFetcher(errors={"many": ModuleNotFoundError("no typing_extensions")})
+        result = collect(self.watches(), fetcher, self.settings,
+                         sleep=Recorder(), rng=self.rng)
+        self.assertIn("typing_extensions", result.failures[0].message)
+        self.assertIn("ModuleNotFoundError", result.failures[0].message)
+
+    def test_an_ordinary_failure_still_retries_and_carries_on(self):
+        fetcher = StubFetcher(default=700, errors={"many": RuntimeError("blocked")})
+        result = collect(self.watches(), fetcher, self.settings,
+                         sleep=Recorder(), rng=self.rng)
+
+        self.assertEqual(len(result.failures), 3)
+        self.assertEqual(result.cheapest("other").price, 700)
+
+
 class PickingTheCheapest(unittest.TestCase):
     """The scraper's own selection, exercised without touching the network."""
 

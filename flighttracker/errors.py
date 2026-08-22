@@ -16,4 +16,13 @@ class ConfigError(FlightTrackerError):
 
 
 class FetchError(FlightTrackerError):
-    """A price lookup failed after every retry was used up."""
+    """A price lookup failed after every retry was used up.
+
+    `permanent` marks the failures that no retry could have fixed — a missing
+    dependency, an API that no longer exists — which are also the ones that
+    will hit every other search in the run in exactly the same way.
+    """
+
+    def __init__(self, message: str, permanent: bool = False):
+        super().__init__(message)
+        self.permanent = permanent

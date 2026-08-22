@@ -322,9 +322,14 @@ public, which shows the source and the whole price history too.
 
 If you want it anyway:
 
-- **Once** — Actions → *Publish the dashboard* → **Run workflow**. That single
-  click enables Pages for the repo and deploys. The URL is
-  `https://<you>.github.io/<repo>/`, and the workflow prints it when it
+- **First, enable Pages once by hand** — Settings → Pages → Build and
+  deployment → Source: **GitHub Actions**. The workflow asks to enable it
+  automatically, but the Actions token is often not permitted to create a Pages
+  site, and the resulting error (`Resource not accessible by integration`) does
+  not say so. If that settings page offers no such option, Pages is not
+  available for a private repository on your plan.
+- **Then publish** — Actions → *Publish the dashboard* → **Run workflow**. The
+  URL is `https://<you>.github.io/<repo>/`, and the workflow prints it when it
   finishes.
 - **After every tracking run** — set the repository variable
   `PUBLISH_DASHBOARD` to `true` (Settings → Secrets and variables → Actions →

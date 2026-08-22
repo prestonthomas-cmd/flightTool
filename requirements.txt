@@ -1,3 +1,14 @@
 # Runtime dependencies. The tests need none of these.
-fast-flights>=2.2
+
+# The API this code targets (create_query / FlightQuery) is 3.x. 2.x exposed a
+# different one (FlightData / get_flights(flight_data=...)), so the floor is not
+# cosmetic.
+fast-flights>=3.1,<4
+
+# fast-flights imports typing_extensions but does not declare it — verified
+# against 3.1.0, whose metadata lists only primp, protobuf and selectolax.
+# Without this line every lookup dies with ModuleNotFoundError on any machine
+# that does not happen to have it already.
+typing_extensions>=4.0
+
 PyYAML>=6.0
