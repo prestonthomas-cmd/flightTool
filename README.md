@@ -313,125 +313,25 @@ private.
 
 ### Publishing it
 
-**Worth thinking about before you do.** A GitHub Pages site is public even when
-the repository is private — outside Enterprise Cloud with access control there
-is no middle setting. Publishing puts your watchlist, your dates and your
-prices on a guessable public URL. Pages for a private repo also needs a paid
-plan; on the free plan the only way to publish is to make the repository
-public, which shows the source and the whole price history too.
+The dashboard is published to GitHub Pages after every tracking run, and on
+demand from Actions → *Publish the dashboard* → **Run workflow**. The URL is
+`https://<you>.github.io/<repo>/`, and the workflow prints it when it finishes.
 
-If you want it anyway:
+**A Pages site is public.** So is this repository — which is what makes Pages
+available on a free plan at all, since publishing from a *private* repo needs a
+paid one, and even then the site itself is still public. Everything on the page
+is already public in the repo: the code, the price history in `data/`, and
+`watches.yaml`. Worth remembering when you put real trips in it.
 
-- **First, enable Pages once by hand** — Settings → Pages → Build and
-  deployment → Source: **GitHub Actions**. The workflow asks to enable it
-  automatically, but the Actions token is often not permitted to create a Pages
-  site, and the resulting error (`Resource not accessible by integration`) does
-  not say so. If that settings page offers no such option, Pages is not
-  available for a private repository on your plan.
-- **Then publish** — Actions → *Publish the dashboard* → **Run workflow**. The
-  URL is `https://<you>.github.io/<repo>/`, and the workflow prints it when it
-  finishes.
-- **After every tracking run** — set the repository variable
-  `PUBLISH_DASHBOARD` to `true` (Settings → Secrets and variables → Actions →
-  Variables).
+If the deploy fails with `Resource not accessible by integration` or
+`Not Found`, set the source by hand once: Settings → Pages → Build and
+deployment → Source: **GitHub Actions**. The workflow asks to enable Pages
+itself, but the Actions token is not always permitted to create the site.
 
-Do neither and nothing is published; the tracker still commits
-`site/index.html` to the repo, where it stays private.
-
-## Comparing like with like
-
-A basic-economy fare and a regular one are different purchases, so a history
-that mixes them makes the percentile compare prices that were never comparable.
-Two things guard against that.
-
-`exclude_basic_economy` **defaults to true**, so what gets tracked is a fare you
-would plausibly book. Set it to `false` if you do buy basic economy — just be
-consistent, because the point is the comparison basis, not which basis you pick.
-
-More usefully, every stored price carries a signature of what it actually
-bought — cabin, stops, passengers, bags, fare exclusions. So a change is
-*detectable* after the fact rather than merely avoidable in advance:
-
-```
-$ flighttracker doctor
-- NYC to Tokyo, December: 47 of 60 stored prices were collected under different
-  search settings (bags 0/0 -> 0/2) — those are a different product, so
-  comparisons against them are not like for like. Give the watch a new id to
-  start a clean history.
-```
-
-## Knowing it still works
-
-A tracker that quietly stops tracking is worse than no tracker, because you
-carry on believing you are covered. Three things make that loud.
-
-**Staleness.** A watch with no *successful* price for `stale_after_hours` (30 by
-default) is reported at the top of the digest and by `doctor`. Note that this
-counts successful lookups, not runs — a run that fails every lookup does not
-reset the clock, which was the whole gap.
-
-**`flighttracker doctor`.** A health check that exits non-zero when something is
-wrong, so cron can mail you:
-
-```cron
-0 8 * * * cd /path/to/flight-price-tracker && .venv/bin/flighttracker doctor || true
-```
-
-`doctor --live` also performs one real lookup, which catches a broken scraper
-immediately rather than waiting a day for staleness to show up.
-`.github/workflows/canary.yml` runs exactly that, weekly.
-
-**A digest that always goes out when something is broken.** Critical concerns
-send an email even when nothing is flagged, and `run --fail-if-stale` exits
-non-zero so a scheduled run fails visibly. The tracking workflow uses it.
-
-## Tuning the rule
-
-`percentile` and `min_observations` are guesses until you measure them. The
-backtest replays your stored history through the *same* decision code a real run
-uses — nothing can see a price that had not happened yet — and reports what the
-rule would have done:
-
-```
-$ flighttracker backtest nyc-to-tokyo-dec
-NYC to Tokyo, December  [nyc-to-tokyo-dec]
-  111 runs over 110 days · low USD 914 · median USD 1,314 · latest USD 948
-  would have sent 20 alert(s) · about 5.5 a month
-  first at 2026-06-14 for USD 1,303 (below_percentile)
-  buying on that first alert would have been USD 389 (43%) above the best it
-  ever saw, USD 914 on 2026-08-17
-```
-
-The last line is the one that matters: an alerting rule is only worth having if
-the price it puts in front of you is close to the best the watch ever saw.
-
-`--sweep` compares thresholds side by side, so the choice is made from evidence
-rather than taste:
-
-```
-$ flighttracker backtest nyc-to-tokyo-dec --sweep
-percentile   alerts  per month   first alert     vs best
-----------  -------  ---------  ------------  ----------
-       10%       13        3.5     USD 1,296        +42%
-       15%       16        4.4     USD 1,296        +42%
-       20%       20        5.5     USD 1,303        +43%
-```
-
-`--percentile`, `--min-observations`, `--cooldown` and `--raw-baseline`
-override individual settings without touching the watchlist.
-
-One caveat, stated in the output too: with the horizon-adjusted baseline on,
-the curve used to re-base each replayed step is built from the whole stored
-dataset, including runs that had not happened yet at the point being replayed.
-The prices being *judged* are strictly historical, but the adjustment applied
-to them is not, so an adjusted replay flatters itself a little. Compare it
-against `--raw-baseline` to see the size of the effect, not to conclude the
-adjustment is free.
-
-**It measures the alerting rule, not the future.** A rule that looks good on one
-watch's history is not thereby a prediction; it is a description of what the
-rule would have done, which is the honest and useful thing to know. It is also
-how the flat-series bug above was found.
+To stop publishing, set the repository variable `PUBLISH_DASHBOARD` to `false`
+(Settings → Secrets and variables → Actions → Variables). The tracker still
+commits `site/index.html` either way, so `git pull && open site/index.html`
+always works without any of this.
 
 ## Email
 

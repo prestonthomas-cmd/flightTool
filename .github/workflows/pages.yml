@@ -1,33 +1,23 @@
 name: Publish the dashboard
 
-# OPT-IN, AND DELIBERATELY SO.
+# Publishes the dashboard to GitHub Pages after every tracking run, and on
+# demand from the Actions tab.
 #
-# A GitHub Pages site is PUBLIC even when the repository is private — outside
-# Enterprise Cloud with access control there is no middle setting. Publishing
-# puts your watchlist, your dates and your prices on a guessable public URL.
+# A Pages site is PUBLIC. So is this repository, which is what makes Pages
+# available on a free plan at all — Pages from a *private* repo needs a paid
+# plan. Everything the page shows is already public in the repo: the code, the
+# price history in `data/`, and `watches.yaml`. Bear that last one in mind when
+# you put real trips in it.
 #
-# BEFORE THE FIRST RUN, enable Pages by hand — once:
+# ONE-TIME SETUP, if the deploy fails:
 #   Settings > Pages > Build and deployment > Source: GitHub Actions
+# The workflow asks to enable Pages itself, but the Actions token is not always
+# permitted to create the site — the first attempt here failed with "Resource
+# not accessible by integration". Setting the source by hand fixes it for good.
 #
-# The workflow asks to enable it automatically, but the Actions token is not
-# always permitted to create a Pages site, and on this repository it is not:
-# the first attempt failed with "Create Pages site failed. Error: Resource not
-# accessible by integration". Enabling it by hand is a one-time step.
-#
-# Then, to publish:  Actions > "Publish the dashboard" > Run workflow.
-#
-# To publish after every tracking run:
-#   set the repository variable PUBLISH_DASHBOARD to `true`
-#   (Settings > Secrets and variables > Actions > Variables).
-#
-# Do neither and nothing is ever published. The tracker still builds
-# `site/index.html` on every run and commits it to the repo, where it stays
-# private — clone it and open the file.
-#
-# GitHub Pages for a *private* repository needs a paid plan. On the free plan
-# the enablement step below fails, and the only way to publish is to make the
-# repository public — which puts the source and the whole price history on
-# show, not just the page.
+# To stop publishing: set the repository variable PUBLISH_DASHBOARD to `false`
+# (Settings > Secrets and variables > Actions > Variables), or disable this
+# workflow. The tracker still commits `site/index.html` either way.
 
 on:
   workflow_dispatch:
@@ -46,9 +36,10 @@ concurrency:
 
 jobs:
   publish:
-    # A manual run is itself the deliberate act, so it does not also need the
-    # variable; the automatic run after each tracking run does.
-    if: github.event_name == 'workflow_dispatch' || vars.PUBLISH_DASHBOARD == 'true'
+    # Publishes by default now that the repository is public. Setting
+    # PUBLISH_DASHBOARD to `false` turns the automatic runs off without
+    # touching this file; a manual run always goes ahead.
+    if: github.event_name == 'workflow_dispatch' || vars.PUBLISH_DASHBOARD != 'false'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
