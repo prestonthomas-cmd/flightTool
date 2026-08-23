@@ -124,8 +124,9 @@ def _parser() -> argparse.ArgumentParser:
     dashboard.add_argument(
         "--out",
         type=Path,
-        default=Path("site/index.html"),
-        help="where to write it (default: site/index.html)",
+        default=Path("index.html"),
+        help="where to write it (default: index.html, which is what GitHub Pages"
+        " serves from the repo root)",
     )
     dashboard.set_defaults(handler=_dashboard)
 

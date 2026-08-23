@@ -47,10 +47,11 @@ jobs:
         run: python -m flighttracker run --fail-if-stale
 
       - name: Rebuild the dashboard
-        # Written into the repo, not published. Publishing is a separate,
-        # opt-in workflow — see .github/workflows/pages.yml.
+        # Written to the repo root as index.html on purpose. GitHub Pages in
+        # "deploy from a branch" mode serves the root, so this is what makes the
+        # site work under either Pages setting rather than depending on one.
         if: always()
-        run: python -m flighttracker dashboard --out site/index.html
+        run: python -m flighttracker dashboard --out index.html
 
       - name: Commit the price history and dashboard
         # Runs even when the fetch step failed, so the recorded errors and any
@@ -66,7 +67,7 @@ jobs:
           fi
           # `git add` first: on the very first run these are untracked, which a
           # plain `git diff` would not notice.
-          git add -A data/ site/ 2>/dev/null || git add -A data/
+          git add -A data/ index.html 2>/dev/null || git add -A data/
           if git diff --cached --quiet; then
             echo "No change to the price history."
             exit 0

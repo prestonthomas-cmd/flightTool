@@ -355,7 +355,7 @@ day in 2026 came back clean, which makes the label meaningless.
 ## The dashboard
 
 ```bash
-flighttracker dashboard                       # writes site/index.html
+flighttracker dashboard --out index.html      # what the workflows write
 flighttracker dashboard --out ~/flights.html  # anywhere you like
 ```
 
@@ -386,10 +386,16 @@ If the deploy fails with `Resource not accessible by integration` or
 deployment → Source: **GitHub Actions**. The workflow asks to enable Pages
 itself, but the Actions token is not always permitted to create the site.
 
+The tracker writes the dashboard to **`index.html` at the repo root**, and
+commits it on every run. That is deliberate: Pages in *deploy from a branch*
+mode serves the repository root, so the site works under either Pages setting
+rather than depending on which one is selected. A `.nojekyll` file stops GitHub
+processing the page as a Jekyll site on that path.
+
 To stop publishing, set the repository variable `PUBLISH_DASHBOARD` to `false`
-(Settings → Secrets and variables → Actions → Variables). The tracker still
-commits `site/index.html` either way, so `git pull && open site/index.html`
-always works without any of this.
+(Settings → Secrets and variables → Actions → Variables). The committed
+`index.html` is there either way, so `git pull && open index.html` always works
+without any of this.
 
 ## Email
 

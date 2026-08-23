@@ -17,7 +17,8 @@ name: Publish the dashboard
 #
 # To stop publishing: set the repository variable PUBLISH_DASHBOARD to `false`
 # (Settings > Secrets and variables > Actions > Variables), or disable this
-# workflow. The tracker still commits `site/index.html` either way.
+# workflow. The tracker still commits `index.html` to the repo root either way,
+# which is also what Pages serves in "deploy from a branch" mode.
 
 on:
   workflow_dispatch:
@@ -55,8 +56,14 @@ jobs:
       - run: pip install PyYAML
 
       # Rebuilt from the committed database rather than trusting the committed
-      # HTML, so the published page always matches the data in the repo.
-      - run: python -m flighttracker dashboard --out site/index.html
+      # HTML, so the published page always matches the data in the repo. Staged
+      # into site/ because the upload publishes a directory's contents as the
+      # site root; the repo's own index.html covers the branch-deploy mode.
+      - run: |
+          python -m flighttracker dashboard --out index.html
+          mkdir -p site
+          cp index.html site/index.html
+          touch site/.nojekyll
 
       # Printed immediately above the failure it explains, because the raw
       # error from configure-pages says nothing about what to actually do.
