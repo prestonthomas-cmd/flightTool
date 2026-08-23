@@ -21,7 +21,13 @@ from .holidays import describe as describe_holiday
 from .holidays import is_peak
 from .run import evaluate_only
 from .signals import Verdict
-from .store import horizon_samples, observations_for_run, parse_iso, run_history
+from .store import (
+    horizon_samples,
+    observations_for_run,
+    parse_iso,
+    run_history,
+    source_counts,
+)
 
 # From the reference palette: light and dark steps of the same hues, each
 # validated against its own surface rather than flipped.
@@ -332,7 +338,9 @@ def _watch_card(conn: Connection, verdict: Verdict, now: datetime) -> str:
     # tile is built from the full history instead — otherwise the card would
     # say "110 runs" directly above a table listing 111.
     history = run_history(conn, watch.id)
-    parts.append(_tiles(verdict, history, now))
+    sources = source_counts(conn, watch.id)
+    imported = sum(runs for name, runs in sources.items() if name != "observed")
+    parts.append(_tiles(verdict, history, now, imported))
 
     if verdict.reasons:
         parts.append('<ul class="reasons">')
@@ -359,7 +367,7 @@ def _watch_card(conn: Connection, verdict: Verdict, now: datetime) -> str:
     return "".join(parts)
 
 
-def _tiles(verdict: Verdict, history, now: datetime) -> str:
+def _tiles(verdict: Verdict, history, now: datetime, imported: int = 0) -> str:
     currency = verdict.currency
     stats = verdict.stats
     tiles = []
@@ -398,14 +406,15 @@ def _tiles(verdict: Verdict, history, now: datetime) -> str:
 
     if history:
         prices = [p.price for p in history]
-        tiles.append(
-            (
-                "Seen",
-                f"{len(history)} runs",
-                f'<div class="d">low {money(min(prices), currency)} · '
-                f"high {money(max(prices), currency)}</div>",
-            )
+        detail = (
+            f'<div class="d">low {money(min(prices), currency)} · '
+            f"high {money(max(prices), currency)}</div>"
         )
+        if imported:
+            detail += (
+                f'<div class="d">{imported} imported from price history</div>'
+            )
+        tiles.append(("Seen", f"{len(history)} runs", detail))
 
     cells = "".join(
         f'<div class="tile"><div class="k">{escape(key)}</div>'

@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS price_history (
   duration_minutes INTEGER,
   origin       TEXT,
   destination  TEXT,
-  fare         TEXT
+  fare         TEXT,
+  -- NULL or 'observed' for prices this tool scraped itself; anything else
+  -- names where an imported price came from.
+  source       TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS price_history_run_leg
@@ -66,7 +69,12 @@ CREATE INDEX IF NOT EXISTS price_history_route
 # is upgraded in place on open, so an existing price history is never lost to a
 # schema change.
 LATER_COLUMNS = {
-    "price_history": {"origin": "TEXT", "destination": "TEXT", "fare": "TEXT"},
+    "price_history": {
+        "origin": "TEXT",
+        "destination": "TEXT",
+        "fare": "TEXT",
+        "source": "TEXT",
+    },
 }
 
 
@@ -88,6 +96,8 @@ class Observation:
     destination: Optional[str] = None
     # What this price actually buys — see `Watch.fare_signature`.
     fare: Optional[str] = None
+    # Where the price came from. None means this tool observed it directly.
+    source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +190,7 @@ def record_observations(
             o.origin,
             o.destination,
             o.fare,
+            o.source,
         )
         for o in observations
     ]
@@ -190,8 +201,9 @@ def record_observations(
             """
             INSERT INTO price_history
               (watch_id, timestamp, price, currency, depart_date, return_date,
-               airlines, stops, duration_minutes, origin, destination, fare)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               airlines, stops, duration_minutes, origin, destination, fare,
+               source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (watch_id, timestamp, depart_date, IFNULL(return_date, ''))
             DO UPDATE SET
               price = excluded.price,
@@ -201,7 +213,8 @@ def record_observations(
               duration_minutes = excluded.duration_minutes,
               origin = excluded.origin,
               destination = excluded.destination,
-              fare = excluded.fare
+              fare = excluded.fare,
+              source = excluded.source
             """,
             rows,
         )
@@ -360,3 +373,56 @@ def date_prices(conn: sqlite3.Connection, watch_id: str) -> list[tuple[str, str,
             (watch_id,),
         )
     ]
+
+
+def record_imported(
+    conn: sqlite3.Connection, rows: Iterable[tuple[str, Observation]]
+) -> int:
+    """Insert imported history, never overwriting a price observed directly.
+
+    `rows` is a sequence of (timestamp, Observation). Unlike a normal run this
+    does not upsert: a price this tool actually watched happen always outranks
+    one imported after the fact, and re-running an import must not duplicate or
+    disturb what is already stored.
+    """
+    payload = [
+        (
+            o.watch_id,
+            timestamp,
+            float(o.price),
+            o.currency,
+            o.depart_date,
+            o.return_date,
+            o.origin,
+            o.destination,
+            o.fare,
+            o.source,
+        )
+        for timestamp, o in rows
+    ]
+    if not payload:
+        return 0
+    with conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO price_history
+              (watch_id, timestamp, price, currency, depart_date, return_date,
+               origin, destination, fare, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        return conn.total_changes - before
+
+
+def source_counts(conn: sqlite3.Connection, watch_id: str) -> dict[str, int]:
+    """How many stored runs came from where, keyed by source."""
+    return {
+        (row["source"] or "observed"): row["runs"]
+        for row in conn.execute(
+            "SELECT source, COUNT(DISTINCT timestamp) AS runs FROM price_history"
+            " WHERE watch_id = ? GROUP BY source",
+            (watch_id,),
+        )
+    }

@@ -154,6 +154,64 @@ unless the price drops a further `alert_improvement` (3% by default). An alert
 is only recorded once the email is actually sent, so a failed send is retried
 on the next run rather than being silently swallowed.
 
+## Starting with history instead of from scratch
+
+A new watch is blind for about ten days: `min_observations` runs have to
+accumulate before a percentile means anything. Google already knows what the
+flight has cost for the past couple of months — that is the graph on its own
+search page — but **it does not send that data in the page this tool scrapes**.
+Verified against a live search: 2.1 MB of HTML, one ISO date in the entire
+payload, no price series. It is fetched separately, and `fast-flights` does not
+make that request.
+
+[SearchAPI](https://www.searchapi.io) is a paid Google Flights proxy that does
+return it, and `fast-flights` already integrates with it. The economics suit a
+one-off: this is **one request per watch, not per run**.
+
+```bash
+export SEARCHAPI_KEY=...            # or put it in .env
+flighttracker backfill --dry-run    # fetch and report, write nothing
+flighttracker backfill              # import it
+flighttracker backfill nyc-to-tokyo-dec   # just one watch
+```
+
+```
+NYC to Tokyo, December  [nyc-to-tokyo-dec]
+  2026-12-10 to 2026-12-24: 28 day(s) of history, 2026-06-01 to 2026-06-28
+  range USD 1,148 to USD 1,391
+  provider calls USD 1,050-1,500 typical, currently low
+  imported 28
+```
+
+Three properties that make this safe to lean on:
+
+- **Imported prices never overwrite observed ones.** A price this tool watched
+  happen always outranks one imported after the fact. Imports insert; they do
+  not upsert.
+- **Re-running imports nothing twice.** Points land at 12:00 UTC, clear of the
+  07:00 and 19:00 runs, so an import can never be mistaken for an observation
+  or collide with one.
+- **Imported history is labelled.** Every row records its source, and the
+  dashboard says `28 imported from price history` beside the run count. Borrowed
+  history should not look like history the tool watched.
+
+One honest limitation: a request covers **one departure/return pair**, while a
+watch may search thirty. The import asks about the combination the watch is
+currently cheapest on, since that is what its own price series usually tracks —
+but it is that combination's history, not the whole window's.
+
+### Without a key
+
+`max_price_alert` fires from the very first run with no history at all, which
+is exactly what it is for. Open Google Flights, look at the typical range it
+shows you, pick a number you would be happy to pay. That covers the gap
+honestly while the real history accumulates.
+
+What not to do: raising the run frequency to reach `min_observations` sooner.
+Twenty prices taken four hours apart are not twenty independent observations —
+they are one week of noise wearing a bigger number, and the tool would start
+alerting on a distribution it has not actually seen.
+
 ## Where the price is heading
 
 A buy signal says a price is low *today*. These three readings say what it has
@@ -407,6 +465,7 @@ flighttracker signals                    # re-judge the latest stored run, no fe
 flighttracker dashboard                  # the whole thing as one HTML page
 flighttracker doctor                     # is it still collecting usable prices?
 flighttracker backtest --sweep           # what would this rule have done?
+flighttracker backfill --dry-run         # what history could be imported?
 ```
 
 `signals` is the one to use when tuning `percentile` or `min_observations` —
@@ -432,8 +491,9 @@ WHERE watch_id = 'nyc-to-tokyo-dec' GROUP BY depart_date ORDER BY 2;
 | `alerts` | what was emailed and when — this is what the cooldown reads |
 
 `price_history` also records `origin` and `destination`, which is what lets the
-horizon curve pool by route, and `fare`, the signature of what each price
-actually bought. A database written by an earlier version gains the
+horizon curve pool by route; `fare`, the signature of what each price actually
+bought; and `source`, which is NULL for prices this tool scraped itself and
+names the provider for imported ones. A database written by an earlier version gains the
 columns on open — the migration is additive and never drops anything.
 
 ## Layout
@@ -447,6 +507,7 @@ flighttracker/
   signals.py    percentiles, all-time lows, ceilings, the cooldown
   health.py     staleness and fare-signature checks
   backtest.py   replaying stored history through the alerting rule
+  backfill.py   importing price history from SearchAPI
   holidays.py   US holidays by rule, and travel peak windows
   forecast.py   trend, step changes, the horizon curve, neighbouring dates
   digest.py     the email, text and HTML
@@ -462,7 +523,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-282 tests, under a second, no network and no dependencies beyond PyYAML — the
+310 tests, under a second, no network and no dependencies beyond PyYAML — the
 suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.

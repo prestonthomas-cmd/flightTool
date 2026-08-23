@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,7 @@ from .digest import (
     render_text,
     send,
 )
+from .backfill import SearchApiHistory, import_history
 from .backtest import format_result, format_sweep, run_backtest, sweep
 from .env import load_env_file
 from .errors import ConfigError, FlightTrackerError
@@ -25,7 +27,14 @@ from .fetch import GoogleFlightsFetcher
 from .health import check as check_health
 from .health import summarize as summarize_health
 from .run import commit_alerts, evaluate_only, execute_run
-from .store import connect, parse_iso, run_history, utc_now
+from .store import (
+    connect,
+    latest_run,
+    observations_for_run,
+    parse_iso,
+    run_history,
+    utc_now,
+)
 
 DEFAULT_CONFIG = "watches.yaml"
 
@@ -122,6 +131,23 @@ def _parser() -> argparse.ArgumentParser:
 
     test_email = sub.add_parser("test-email", help="send a sample digest")
     test_email.set_defaults(handler=_test_email)
+
+    backfill = sub.add_parser(
+        "backfill",
+        help="import Google's own price history so a watch is not blind on day one",
+    )
+    backfill.add_argument("watch_id", nargs="?", help="limit to one watch")
+    backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch and report, but write nothing",
+    )
+    backfill.add_argument(
+        "--api-key",
+        default=None,
+        help="SearchAPI key (defaults to the SEARCHAPI_KEY environment variable)",
+    )
+    backfill.set_defaults(handler=_backfill)
 
     doctor = sub.add_parser(
         "doctor", help="check the tool is still collecting usable prices"
@@ -335,6 +361,59 @@ def _signals(args) -> int:
     conn = connect(config.settings.db_path)
     verdicts = evaluate_only(config, conn, utc_now())
     print(render_text(utc_now(), verdicts, []))
+    return EXIT_OK
+
+
+def _backfill(args) -> int:
+    """One request per watch, not per run — see flighttracker/backfill.py."""
+    config = _load(args)
+    settings = config.settings
+    conn = connect(settings.db_path)
+
+    watches = [w for w in config.watches if not args.watch_id or w.id == args.watch_id]
+    if args.watch_id and not watches:
+        print(f"No watch named {args.watch_id!r} in {config.source}.", file=sys.stderr)
+        return EXIT_CONFIG
+
+    if not args.api_key and not os.environ.get("SEARCHAPI_KEY"):
+        print(
+            "Backfill needs a SearchAPI key: set SEARCHAPI_KEY in .env or pass\n"
+            "--api-key. Google's price history is not in the page this tool\n"
+            "scrapes, so there is no free route to it — see the README.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG
+
+    provider = SearchApiHistory(api_key=args.api_key, currency=settings.currency)
+    if args.dry_run:
+        print("Dry run: fetching history, writing nothing.\n")
+
+    failures = 0
+    for watch in watches:
+        latest = latest_run(conn, watch.id)
+        cheapest = None
+        if latest:
+            rows = observations_for_run(conn, watch.id, latest)
+            if rows:
+                cheapest = (rows[0]["depart_date"], rows[0]["return_date"])
+        try:
+            result = import_history(
+                conn, watch, provider, settings, cheapest, persist=not args.dry_run
+            )
+        except Exception as exc:  # noqa: BLE001 - provider and network both raise
+            print(f"{watch.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        print("\n".join(result.describe()))
+        print()
+
+    if failures:
+        return EXIT_RUN_FAILED
+    if not args.dry_run:
+        print(
+            "Imported prices are marked as imported and never overwrite one this\n"
+            "tool observed itself, so this is safe to re-run."
+        )
     return EXIT_OK
 
 

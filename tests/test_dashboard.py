@@ -195,6 +195,25 @@ class Rendering(unittest.TestCase):
         # Median of the plotted points is 1200, not anything re-based.
         self.assertIn("USD 1,200", svg)
 
+    def test_imported_history_is_declared_on_the_card(self):
+        """Borrowed history should not look like history this tool watched."""
+        from datetime import date as date_type
+        from flighttracker.backfill import History, PricePoint, import_history
+
+        class Stub:
+            def history(self, watch, depart, back):
+                return History(points=(
+                    PricePoint(date_type(2026, 6, 1), 1200.0),
+                    PricePoint(date_type(2026, 6, 2), 1150.0),
+                ), currency="USD")
+
+        config = make_config(make_watch("tokyo"))
+        import_history(self.conn, config.watches[0], Stub(), config.settings)
+        self.track(config, [900], 2)
+
+        html = render_document(self.conn, config, START + timedelta(days=2))
+        self.assertIn("2 imported from price history", html)
+
     def test_an_adjusted_baseline_is_declared_not_hidden(self):
         """It changes the judgement, so the page has to say it happened."""
         from unittest import mock
