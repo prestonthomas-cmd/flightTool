@@ -9,7 +9,7 @@ a chart to answer.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from sqlite3 import Connection
 from statistics import median as statistics_median
@@ -234,7 +234,8 @@ def _card(conn, config, verdict: Verdict, samples, now: datetime) -> str:
 
     curve = curve_for_watch(samples, config.settings, watch.origin, watch.destination)
     projection = project(
-        history, watch, curve, config.settings, now, price=verdict.price
+        history, watch, curve, config.settings, now,
+        price=verdict.price, currency=currency,
     )
     parts.append(_chart(history, projection, currency))
     parts.append(
@@ -304,10 +305,21 @@ def _chart(history, projection, currency: str) -> str:
         )
         band.append(BandPoint(x=x, low=step.low, high=step.high))
 
-    labels = [(actual[0].x, parse_iso(history[0].timestamp).strftime("%d %b"))]
-    labels.append((actual[-1].x, parse_iso(history[-1].timestamp).strftime("%d %b")))
-    if predicted:
-        labels.append((predicted[-1].x, projection.points[-1].day.strftime("%d %b")))
+    # Spaced across the whole x range rather than pinned to the readings. A
+    # few days of history beside months of projection puts the first and last
+    # observations within pixels of each other, and the labels collide.
+    span_end = (predicted[-1].x if predicted else actual[-1].x)
+    labels = [
+        (
+            position,
+            (origin + timedelta(days=position)).strftime("%d %b"),
+        )
+        for position in (
+            actual[0].x,
+            actual[0].x + (span_end - actual[0].x) / 2,
+            span_end,
+        )
+    ]
 
     return history_and_forecast(
         actual,

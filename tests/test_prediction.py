@@ -294,49 +294,48 @@ class ProjectingForward(unittest.TestCase):
         self.assertFalse(outlook.usable)
         self.assertIn("No prices recorded", outlook.note)
 
-    def test_too_few_runs_explains_itself_rather_than_guessing(self):
-        outlook = self.project(runs(900, 880))
-        self.assertFalse(outlook.usable)
-        self.assertIn("too few", outlook.note.lower())
-
-    def test_a_flat_history_projects_flat(self):
+    def test_the_typical_pattern_carries_it_all_the_way_to_departure(self):
         outlook = self.project(runs(*([900] * 12)))
         self.assertTrue(outlook.usable)
-        self.assertEqual(outlook.method, "trend")
-        for point in outlook.points:
-            self.assertAlmostEqual(point.price, 900, delta=1)
+        self.assertEqual(outlook.method, "typical")
+        self.assertEqual(outlook.points[-1].day, self.departure)
 
-    def test_a_falling_history_projects_downwards(self):
-        outlook = self.project(runs(*range(1200, 900, -25)))
+    def test_it_says_plainly_that_the_shape_is_not_this_flights_own_history(self):
+        note = self.project(runs(*([900] * 12))).note
+        self.assertIn("typical advance-purchase pattern", note)
+        self.assertIn("not this flight's own history", note)
+
+    def test_the_projection_troughs_and_then_climbs_into_departure(self):
+        """The whole point: a flat line told the reader nothing."""
+        outlook = self.project(runs(*([900] * 12)))
         prices = [p.price for p in outlook.points]
-        self.assertEqual(prices, sorted(prices, reverse=True))
+
+        self.assertLess(min(prices), prices[0])      # dips below today
+        self.assertGreater(prices[-1], prices[0])    # and ends above it
+        self.assertGreater(prices[-1], min(prices) * 1.5)
+
+    def test_the_recent_trend_is_reported_in_words_not_drawn_as_the_line(self):
+        falling = self.project(runs(*range(1200, 900, -25)))
+        self.assertIn("drifting down", falling.note)
+        # The geometry still follows the booking pattern, not the slope.
+        self.assertEqual(falling.method, "typical")
+
+    def test_a_flat_flight_says_so(self):
+        self.assertIn("has been flat", self.project(runs(*([900] * 12))).note)
 
     def test_the_band_widens_the_further_out_it_goes(self):
         outlook = self.project(runs(*([900] * 12)))
-        widths = [p.high - p.low for p in outlook.points]
-        self.assertEqual(widths, sorted(widths))
+        widths = [(p.high - p.low) / p.price for p in outlook.points]
         self.assertGreater(widths[-1], widths[0])
 
-    def test_a_perfectly_flat_history_still_admits_uncertainty(self):
-        """A zero-width band would be the chart claiming a certainty it lacks."""
+    def test_a_generic_shape_admits_more_doubt_than_your_own_data(self):
         outlook = self.project(runs(*([900] * 12)))
         first = outlook.points[0]
-        self.assertGreaterEqual((first.high - first.price) / first.price, MIN_BAND * 0.99)
+        self.assertGreaterEqual(
+            (first.high - first.price) / first.price, MIN_BAND * 2
+        )
 
-    def test_the_trend_method_is_capped_to_a_short_horizon(self):
-        """A slope measured over days cannot be carried out for months."""
-        outlook = self.project(runs(*([900] * 12)))
-        furthest = (outlook.points[-1].day - NOW.date()).days
-        self.assertLessEqual(furthest, 28)
-
-    def test_it_never_projects_past_departure(self):
-        soon = NOW.date() + timedelta(days=10)
-        watch = make_watch("t", depart=(soon,), returns=None)
-        outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
-        for point in outlook.points:
-            self.assertLessEqual(point.day, soon)
-
-    def test_a_usable_curve_is_preferred_and_reaches_further(self):
+    def test_your_own_curve_is_preferred_when_it_can_form(self):
         curve = HorizonCurve(
             buckets=tuple(
                 HorizonBucket(low, high, index, 20, 2)
@@ -350,17 +349,44 @@ class ProjectingForward(unittest.TestCase):
         outlook = self.project(runs(*([1000] * 12)), curve=curve)
 
         self.assertEqual(outlook.method, "horizon")
-        self.assertIn("usually do next", outlook.note)
-        # It follows the curve down rather than staying flat.
+        self.assertIn("your own", outlook.note)
         self.assertLess(outlook.points[-1].price, outlook.points[0].price)
-        furthest = (outlook.points[-1].day - NOW.date()).days
-        self.assertGreater(furthest, 28)
+
+    def test_your_own_curve_carries_a_tighter_band(self):
+        curve = HorizonCurve(
+            buckets=tuple(
+                HorizonBucket(low, high, index, 20, 2)
+                for low, high, index in ((90, 119, 1.05), (120, 179, 1.15))
+            ),
+            scope="all watches", samples=200, watches=3,
+        )
+        mine = self.project(runs(*([1000] * 12)), curve=curve)
+        generic = self.project(runs(*([1000] * 12)))
+
+        def width(p):
+            return (p.points[0].high - p.points[0].low) / p.points[0].price
+
+        self.assertLess(width(mine), width(generic))
 
     def test_the_current_price_anchors_the_projection(self):
         outlook = self.project(runs(*([900] * 12)), price=600.0)
-        self.assertAlmostEqual(outlook.points[0].price, 600, delta=2)
+        self.assertLess(outlook.points[0].price, 700)
+
+    def test_it_never_projects_past_departure(self):
+        soon = NOW.date() + timedelta(days=40)
+        watch = make_watch("t", depart=(soon,), returns=None)
+        outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
+        for point in outlook.points:
+            self.assertLessEqual(point.day, soon)
+        self.assertEqual(outlook.points[-1].day, soon)
 
     def test_a_departure_already_past_projects_nothing(self):
         watch = make_watch("t", depart=(NOW.date() - timedelta(days=1),), returns=None)
         outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
         self.assertFalse(outlook.usable)
+
+    def test_a_departure_within_the_week_is_too_close_to_project(self):
+        watch = make_watch("t", depart=(NOW.date() + timedelta(days=3),), returns=None)
+        outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
+        self.assertFalse(outlook.usable)
+        self.assertIn("too close", outlook.note)

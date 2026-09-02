@@ -220,13 +220,18 @@ class Rendering(unittest.TestCase):
         self.assertIn("Projected", html)
         self.assertIn("Could be anywhere in here", html)
 
-    def test_too_little_history_explains_itself_instead_of_drawing_a_guess(self):
-        config = make_config(make_watch("tokyo"), min_trend_observations=20)
-        self.track(config, [900, 880, 910], 5)
-        html = self.page(config, 5)
+    def test_the_projection_says_where_its_shape_came_from(self):
+        config = make_config(make_watch("tokyo"), min_trend_observations=4)
+        self.track(config, [900, 880, 910, 870, 890, 875], 10)
+        html = self.page(config, 10)
 
+        self.assertIn("typical advance-purchase pattern", html)
+        self.assertIn("not this flight&#x27;s own history", html)
+
+    def test_a_watch_with_no_prices_draws_no_projection(self):
+        config = make_config(make_watch("gone"))
+        html = render_document(self.conn, config, START)
         self.assertNotIn("series projected", html)
-        self.assertIn("A projection needs", html)
         self.assertNotIn("Could be anywhere in here", html)
 
 

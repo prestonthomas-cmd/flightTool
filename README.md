@@ -364,21 +364,28 @@ deliberately one thing per watch: **what the price has been, and where it is
 projected to go.** A solid line for what was recorded, a dashed line for the
 projection, and a shaded band for how wrong that could be. Nothing else.
 
-The projection uses whichever of two methods the data actually supports:
+The projection runs **all the way to departure**, and uses whichever source
+knows most about your flight:
 
-- **The booking-horizon curve**, when it has enough to say something — what
-  prices this far from departure typically do next, pooled across every watch.
-  It runs all the way to departure.
-- **This flight's own trend** otherwise, and only **28 days forward**. A slope
-  measured across a few days cannot be carried out for months; doing so would
-  be drawing, not forecasting.
-- **Neither**, when there is too little history. The page then says exactly
-  what is missing instead of drawing a guess.
+- **The booking-horizon curve built from your own watches** — what prices this
+  far out have actually gone on to do. Best, but it needs several watches
+  sitting at overlapping distances from departure before it can form.
+- **The typical advance-purchase pattern** otherwise. Fares sit high far out,
+  trough around six to eight weeks before departure, then climb steeply through
+  the last three. This is a general shape rather than your data, and the page
+  says so plainly — but it beats the alternative, which was a flat line that
+  told you nothing.
+
+A flight's own recent trend is deliberately **not** used for the line's
+geometry. A slope measured across ten days, carried out to a December
+departure, is drawing rather than forecasting. Where it is informative it is
+reported in words: *"Its own price has been drifting down about USD 40 a week
+over the last 10 days."*
 
 The band widens with the square root of time, as a random walk does, and never
 narrows below 3% — a fare that has held steady for a week is not thereby
-certain, and a zero-width band would be the chart claiming a confidence it
-cannot back.
+certain. A projection resting on the general pattern rather than your own data
+starts wider still, because it is an assumption about flights in general.
 
 The reasoning behind a buy signal still exists in the email digest and in
 `flighttracker signals`; it is just not on this page. The page keeps a

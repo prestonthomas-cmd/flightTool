@@ -921,20 +921,52 @@ def rebase(
 
 # --- Forward projection ------------------------------------------------------
 #
-# Two methods, in order of how much they can be trusted.
+# Three sources, in descending order of how much each knows about *this* flight:
 #
-# The booking-horizon curve is the principled one: it says what prices at this
-# distance from departure typically do next, drawn from every watch. When it is
-# thin — which is most of the time early on — the fallback is this watch's own
-# measured trend, and only over a short horizon, because extrapolating a slope
-# measured across days into months is not forecasting, it is drawing.
+# 1. The booking-horizon curve built from your own watches. Best, but it needs
+#    several watches sitting at overlapping distances from departure.
+# 2. The typical advance-purchase pattern below. Not your data — a general
+#    shape — but it is the shape airfares actually follow, and it says something
+#    from the first run instead of drawing a flat line to nowhere.
+# 3. Nothing, when there is no current price to anchor to.
+#
+# A flight's own recent trend is deliberately not used for the line's geometry.
+# A slope measured across ten days, carried out to a December departure, is
+# drawing rather than forecasting. Where it is informative it is said in words.
 
-TREND_HORIZON_DAYS = 28
 PROJECTION_STEP_DAYS = 7
 
-# A fare that has held steady for a week is not thereby certain. Claiming a
-# zero-width band would be the chart telling a lie it cannot back up.
 MIN_BAND = 0.03
+# The typical pattern is an assumption about flights in general, so a projection
+# resting on it has to admit more room to be wrong than one built from your own
+# observations.
+PRIOR_MIN_BAND = 0.08
+
+# Relative price by days before departure. Fares sit high far out, drift to a
+# trough around six to eight weeks, and climb steeply through the last three —
+# which is the part this tool exists to keep you ahead of. An indicative shape
+# only, replaced by your own curve the moment that can form.
+TYPICAL_BOOKING_CURVE: tuple[tuple[int, int, float], ...] = (
+    (0, 2, 1.85),
+    (3, 6, 1.62),
+    (7, 13, 1.38),
+    (14, 20, 1.18),
+    (21, 29, 1.06),
+    (30, 44, 0.97),
+    (45, 59, 0.94),
+    (60, 89, 0.97),
+    (90, 119, 1.03),
+    (120, 179, 1.07),
+    (180, 730, 1.12),
+)
+
+
+def typical_index(days: int) -> Optional[float]:
+    """Where `days` before departure sits on the general pattern."""
+    for low, high, index in TYPICAL_BOOKING_CURVE:
+        if low <= days <= high:
+            return index
+    return None
 
 
 @dataclass(frozen=True)
@@ -956,11 +988,56 @@ class Projection:
         return len(self.points) >= 2
 
 
-def _band(price: float, days_ahead: int, volatility: float) -> tuple[float, float]:
+def _band(
+    price: float, days_ahead: int, volatility: float, floor: float
+) -> tuple[float, float]:
     """Uncertainty widening with the square root of time, as a walk does."""
     weeks = max(days_ahead / 7.0, 1.0)
-    spread = max(volatility, MIN_BAND) * math.sqrt(weeks)
+    spread = max(volatility, floor) * math.sqrt(weeks)
     return price * (1 - spread), price * (1 + spread)
+
+
+def _walk(
+    days_out: int,
+    now: datetime,
+    current: float,
+    index_at,
+    here: float,
+    volatility: float,
+    floor: float,
+) -> list[Projected]:
+    """Step weekly from today to departure, following an index curve."""
+    steps = list(range(PROJECTION_STEP_DAYS, days_out + 1, PROJECTION_STEP_DAYS))
+    if steps and steps[-1] != days_out:
+        steps.append(days_out)   # always land on departure itself
+
+    points: list[Projected] = []
+    for ahead in steps:
+        index = index_at(days_out - ahead)
+        if not index or index <= 0:
+            continue
+        expected = max(current * index / here, 1.0)
+        low, high = _band(expected, ahead, volatility, floor)
+        points.append(
+            Projected(now.date() + timedelta(days=ahead), expected, low, high)
+        )
+    return points
+
+
+def _trend_clause(history, settings: Settings, currency: str = "") -> str:
+    trend = build_trend(history, settings)
+    if trend is None:
+        return ""
+    if trend.direction == FLAT:
+        return (
+            f" Its own price has been flat over the last {trend.span_days} days."
+        )
+    way = "down" if trend.per_week < 0 else "up"
+    unit = f"{currency} " if currency else ""
+    return (
+        f" Its own price has been drifting {way} about {unit}"
+        f"{abs(trend.per_week):,.0f} a week over the last {trend.span_days} days."
+    )
 
 
 def project(
@@ -970,6 +1047,7 @@ def project(
     settings: Settings,
     now: datetime,
     price: Optional[float] = None,
+    currency: str = "",
 ) -> Projection:
     """Where this watch's price is likely to go, with honest uncertainty."""
     prices = [point.price for point in history]
@@ -981,67 +1059,60 @@ def project(
     days_out = (departure - now.date()).days
     if days_out <= 0:
         return Projection(note="Departure has passed.")
-
-    volatility = volatility_of(prices)
-    if volatility is None:
+    if days_out < PROJECTION_STEP_DAYS:
         return Projection(
-            note=f"Only {len(prices)} run(s) so far — too few to project from."
+            note=f"Departure is {days_out} day(s) away — too close to project over."
         )
+
+    volatility = volatility_of(prices) or 0.0
 
     here = curve.bucket_for(days_out) if curve.usable else None
     if here is not None and here.index > 0:
-        points = []
-        for ahead in range(PROJECTION_STEP_DAYS, days_out + 1, PROJECTION_STEP_DAYS):
-            bucket = curve.bucket_for(days_out - ahead)
-            if bucket is None or bucket.index <= 0:
-                continue
-            expected = current * (bucket.index / here.index)
-            low, high = _band(expected, ahead, volatility)
-            points.append(
-                Projected(now.date() + timedelta(days=ahead), expected, low, high)
-            )
+        points = _walk(
+            days_out,
+            now,
+            current,
+            lambda remaining: (
+                curve.bucket_for(remaining).index
+                if curve.bucket_for(remaining)
+                else None
+            ),
+            here.index,
+            volatility,
+            MIN_BAND,
+        )
         if len(points) >= 2:
             return Projection(
                 points=tuple(points),
                 method="horizon",
                 note=(
-                    f"From {curve.samples} observations across {curve.scope}: what "
-                    "prices this far from departure usually do next."
+                    f"Built from your own {curve.samples} observations across "
+                    f"{curve.scope}: what prices this far from departure have "
+                    "actually gone on to do."
+                    + _trend_clause(history, settings, currency)
                 ),
             )
 
-    trend = build_trend(history, settings)
-    if trend is None:
-        return Projection(
-            note=(
-                f"{len(prices)} run(s) so far. A projection needs either "
-                f"{settings.min_trend_observations} runs for this flight's own "
-                "trend, or a booking-horizon curve, which needs several watches "
-                "with overlapping histories."
+    anchor = typical_index(days_out)
+    if anchor:
+        points = _walk(
+            days_out, now, current, typical_index, anchor, volatility, PRIOR_MIN_BAND
+        )
+        if len(points) >= 2:
+            return Projection(
+                points=tuple(points),
+                method="typical",
+                note=(
+                    "Following the typical advance-purchase pattern: fares sit "
+                    "high far out, trough around six to eight weeks before "
+                    "departure, then climb steeply through the last three. This "
+                    "is a general shape, not this flight's own history — that "
+                    "needs several watches at overlapping distances from "
+                    "departure before it can form."
+                    + _trend_clause(history, settings, currency)
+                ),
             )
-        )
-
-    per_day = trend.per_week / 7.0
-    limit = min(days_out, TREND_HORIZON_DAYS)
-    points = []
-    for ahead in range(PROJECTION_STEP_DAYS, limit + 1, PROJECTION_STEP_DAYS):
-        expected = max(current + per_day * ahead, 1.0)
-        low, high = _band(expected, ahead, volatility)
-        points.append(
-            Projected(now.date() + timedelta(days=ahead), expected, low, high)
-        )
-    if len(points) < 2:
-        return Projection(
-            note=f"Departure is {days_out} day(s) away — too close to project over."
-        )
 
     return Projection(
-        points=tuple(points),
-        method="trend",
-        note=(
-            f"This flight's own trend over {trend.span_days} days "
-            f"({trend.observations} runs), carried {limit} days forward. Not the "
-            "booking-horizon curve — that needs several watches with overlapping "
-            "histories, and does not have them yet."
-        ),
+        note=f"Departure is {days_out} days out, beyond the range this projects over."
     )
