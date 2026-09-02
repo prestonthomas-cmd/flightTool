@@ -359,15 +359,33 @@ flighttracker dashboard --out index.html      # what the workflows write
 flighttracker dashboard --out ~/flights.html  # anywhere you like
 ```
 
-One self-contained HTML file — no server, no build step, no CDN, nothing
-fetched. Open it from disk. Per watch it shows the current price against its
-median, the buy-signal state and why, the outlook above, a price-history chart,
-and the date grid for the latest run with holiday-peak dates marked. Below
-that, the pooled booking-horizon curve. It follows your system light/dark
-setting, and every chart has a hover readout and a table view underneath.
+One self-contained HTML file — no server, no build step, nothing fetched — and
+deliberately one thing per watch: **what the price has been, and where it is
+projected to go.** A solid line for what was recorded, a dashed line for the
+projection, and a shaded band for how wrong that could be. Nothing else.
 
-The tracker rebuilds it on every run and commits it to the repo, where it stays
-private.
+The projection uses whichever of two methods the data actually supports:
+
+- **The booking-horizon curve**, when it has enough to say something — what
+  prices this far from departure typically do next, pooled across every watch.
+  It runs all the way to departure.
+- **This flight's own trend** otherwise, and only **28 days forward**. A slope
+  measured across a few days cannot be carried out for months; doing so would
+  be drawing, not forecasting.
+- **Neither**, when there is too little history. The page then says exactly
+  what is missing instead of drawing a guess.
+
+The band widens with the square root of time, as a random walk does, and never
+narrows below 3% — a fare that has held steady for a week is not thereby
+certain, and a zero-width band would be the chart claiming a confidence it
+cannot back.
+
+The reasoning behind a buy signal still exists in the email digest and in
+`flighttracker signals`; it is just not on this page. The page keeps a
+**Buy signal** pill and a green edge when a watch is flagged, and the numbers
+stay reachable in a collapsed table under each chart.
+
+It follows your system light/dark setting, and every point has a hover readout.
 
 ### Publishing it
 
@@ -517,7 +535,7 @@ flighttracker/
   holidays.py   US holidays by rule, and travel peak windows
   forecast.py   trend, step changes, the horizon curve, neighbouring dates
   digest.py     the email, text and HTML
-  charts.py     inline SVG line and bar charts, no dependencies
+  charts.py     the inline SVG chart, no dependencies
   dashboard.py  the self-contained HTML page
   run.py        one run: fetch, store, judge, annotate
   cli.py        argument parsing and the subcommands
@@ -529,7 +547,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-310 tests, under a second, no network and no dependencies beyond PyYAML — the
+318 tests, under a second, no network and no dependencies beyond PyYAML — the
 suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.
