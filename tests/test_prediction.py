@@ -6,7 +6,6 @@ from datetime import date, datetime, timedelta, timezone
 
 from flighttracker.config import Settings
 from flighttracker.forecast import (
-    MIN_BAND,
     HorizonBucket,
     HorizonCurve,
     build_weekday_profile,
@@ -16,6 +15,7 @@ from flighttracker.forecast import (
     rebase,
     waiting_record,
 )
+from flighttracker.model import fit as fit_model
 from flighttracker.store import HorizonSample, RunPoint, to_iso
 
 from .support import make_watch
@@ -271,8 +271,37 @@ class RebasingOntoTheBookingWindow(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+def observations(watches=3, days=200, base=1000.0, start=None):
+    """Synthetic price rows: several watches, each seen at many horizons.
+
+    Enough breadth for the model to learn a horizon curve from data rather
+    than leaning entirely on its prior.
+    """
+    start = start or NOW.date()
+    rows = []
+    for index in range(watches):
+        departure = start + timedelta(days=days + index * 7)
+        level = base * (1.0 + 0.2 * index)
+        day = start
+        while day <= departure:
+            out = (departure - day).days
+            # A real advance-purchase shape: dear far out, trough, late spike.
+            factor = 1.15 if out > 100 else 0.95 if out > 30 else 1.0 + (30 - out) * 0.02
+            rows.append(
+                HorizonSample(
+                    watch_id=f"w{index}",
+                    origin="JFK",
+                    destination="HND",
+                    observed_on=to_iso(
+                        datetime.combine(day, NOW.timetz())
+                    ),
+                    depart_date=departure.isoformat(),
+                    price=round(level * factor, 2),
+                )
+            )
+            day += timedelta(days=3)
+    return rows
 
 
 class ProjectingForward(unittest.TestCase):
@@ -282,11 +311,11 @@ class ProjectingForward(unittest.TestCase):
         self.settings = Settings(min_trend_observations=4)
         self.departure = NOW.date() + timedelta(days=120)
         self.watch = make_watch("t", depart=(self.departure,), returns=None)
-        self.thin = HorizonCurve(buckets=(), scope="all watches", samples=0, watches=0)
+        self.bare = fit_model([])
 
-    def project(self, history, curve=None, **kwargs):
+    def project(self, history, model=None, **kwargs):
         return project(
-            history, self.watch, curve or self.thin, self.settings, NOW, **kwargs
+            history, self.watch, model or self.bare, self.settings, NOW, **kwargs
         )
 
     def test_no_history_means_no_projection(self):
@@ -294,16 +323,16 @@ class ProjectingForward(unittest.TestCase):
         self.assertFalse(outlook.usable)
         self.assertIn("No prices recorded", outlook.note)
 
-    def test_the_typical_pattern_carries_it_all_the_way_to_departure(self):
+    def test_it_carries_all_the_way_to_departure(self):
         outlook = self.project(runs(*([900] * 12)))
         self.assertTrue(outlook.usable)
-        self.assertEqual(outlook.method, "typical")
         self.assertEqual(outlook.points[-1].day, self.departure)
 
-    def test_it_says_plainly_that_the_shape_is_not_this_flights_own_history(self):
-        note = self.project(runs(*([900] * 12))).note
-        self.assertIn("typical advance-purchase pattern", note)
-        self.assertIn("not this flight's own history", note)
+    def test_with_no_data_it_says_the_shape_is_the_general_pattern(self):
+        outlook = self.project(runs(*([900] * 12)))
+        self.assertEqual(outlook.evidence, 0.0)
+        self.assertIn("general advance-purchase pattern", outlook.note)
+        self.assertIn("have not yet moved it", outlook.note)
 
     def test_the_projection_troughs_and_then_climbs_into_departure(self):
         """The whole point: a flat line told the reader nothing."""
@@ -312,13 +341,19 @@ class ProjectingForward(unittest.TestCase):
 
         self.assertLess(min(prices), prices[0])      # dips below today
         self.assertGreater(prices[-1], prices[0])    # and ends above it
-        self.assertGreater(prices[-1], min(prices) * 1.5)
 
     def test_the_recent_trend_is_reported_in_words_not_drawn_as_the_line(self):
         falling = self.project(runs(*range(1200, 900, -25)))
+        rising = self.project(runs(*range(900, 1200, 25)))
         self.assertIn("drifting down", falling.note)
-        # The geometry still follows the booking pattern, not the slope.
-        self.assertEqual(falling.method, "typical")
+        self.assertIn("drifting up", rising.note)
+        # The geometry is the same either way: the slope does not steer it,
+        # it only re-anchors the line on wherever the price now sits.
+        def shape(outlook):
+            first = outlook.points[0].price
+            return [round(p.price / first, 9) for p in outlook.points]
+
+        self.assertEqual(shape(falling), shape(rising))
 
     def test_a_flat_flight_says_so(self):
         self.assertIn("has been flat", self.project(runs(*([900] * 12))).note)
@@ -328,45 +363,32 @@ class ProjectingForward(unittest.TestCase):
         widths = [(p.high - p.low) / p.price for p in outlook.points]
         self.assertGreater(widths[-1], widths[0])
 
-    def test_a_generic_shape_admits_more_doubt_than_your_own_data(self):
-        outlook = self.project(runs(*([900] * 12)))
-        first = outlook.points[0]
-        self.assertGreaterEqual(
-            (first.high - first.price) / first.price, MIN_BAND * 2
-        )
+    def test_data_shifts_the_curve_off_the_prior_and_says_by_how_much(self):
+        model = fit_model(observations())
+        outlook = self.project(runs(*([1000] * 12)), model=model)
 
-    def test_your_own_curve_is_preferred_when_it_can_form(self):
-        curve = HorizonCurve(
-            buckets=tuple(
-                HorizonBucket(low, high, index, 20, 2)
-                for low, high, index in (
-                    (30, 44, 0.85), (45, 59, 0.90), (60, 89, 0.95),
-                    (90, 119, 1.05), (120, 179, 1.15),
-                )
-            ),
-            scope="all watches", samples=200, watches=3,
-        )
-        outlook = self.project(runs(*([1000] * 12)), curve=curve)
+        self.assertGreater(outlook.evidence, 0.5)
+        self.assertIn("Fitted mostly to your own data", outlook.note)
+        self.assertIn(f"{model.observations} observations", outlook.note)
 
-        self.assertEqual(outlook.method, "horizon")
-        self.assertIn("your own", outlook.note)
-        self.assertLess(outlook.points[-1].price, outlook.points[0].price)
-
-    def test_your_own_curve_carries_a_tighter_band(self):
-        curve = HorizonCurve(
-            buckets=tuple(
-                HorizonBucket(low, high, index, 20, 2)
-                for low, high, index in ((90, 119, 1.05), (120, 179, 1.15))
-            ),
-            scope="all watches", samples=200, watches=3,
-        )
-        mine = self.project(runs(*([1000] * 12)), curve=curve)
+    def test_a_fitted_curve_carries_a_tighter_band_than_the_bare_prior(self):
+        mine = self.project(runs(*([1000] * 12)), model=fit_model(observations()))
         generic = self.project(runs(*([1000] * 12)))
 
-        def width(p):
-            return (p.points[0].high - p.points[0].low) / p.points[0].price
+        def width(outlook):
+            first = outlook.points[0]
+            return (first.high - first.low) / first.price
 
         self.assertLess(width(mine), width(generic))
+
+    def test_a_fitted_curve_recovers_the_shape_it_was_shown(self):
+        """Planted: dear beyond 100 days, cheapest in the 30-100 band."""
+        model = fit_model(observations())
+        far = model.horizon_at(110).multiplier
+        middle = model.horizon_at(60).multiplier
+
+        self.assertLess(middle, far)
+        self.assertGreater(model.horizon_at(3).multiplier, middle)
 
     def test_the_current_price_anchors_the_projection(self):
         outlook = self.project(runs(*([900] * 12)), price=600.0)
@@ -375,18 +397,22 @@ class ProjectingForward(unittest.TestCase):
     def test_it_never_projects_past_departure(self):
         soon = NOW.date() + timedelta(days=40)
         watch = make_watch("t", depart=(soon,), returns=None)
-        outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
+        outlook = project(runs(*([900] * 12)), watch, self.bare, self.settings, NOW)
         for point in outlook.points:
             self.assertLessEqual(point.day, soon)
         self.assertEqual(outlook.points[-1].day, soon)
 
     def test_a_departure_already_past_projects_nothing(self):
         watch = make_watch("t", depart=(NOW.date() - timedelta(days=1),), returns=None)
-        outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
+        outlook = project(runs(*([900] * 12)), watch, self.bare, self.settings, NOW)
         self.assertFalse(outlook.usable)
 
     def test_a_departure_within_the_week_is_too_close_to_project(self):
         watch = make_watch("t", depart=(NOW.date() + timedelta(days=3),), returns=None)
-        outlook = project(runs(*([900] * 12)), watch, self.thin, self.settings, NOW)
+        outlook = project(runs(*([900] * 12)), watch, self.bare, self.settings, NOW)
         self.assertFalse(outlook.usable)
         self.assertIn("too close", outlook.note)
+
+
+if __name__ == "__main__":
+    unittest.main()

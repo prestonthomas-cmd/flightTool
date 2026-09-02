@@ -136,5 +136,54 @@ class CommandLine(unittest.TestCase):
         self.assertFalse((self.tmp / "prices.db").exists())
 
 
+
+class Evaluating(unittest.TestCase):
+    """`flighttracker evaluate` — the command that scores the price model."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.config = self.tmp / "watches.yaml"
+        self.config.write_text(textwrap.dedent(WATCHLIST))
+        self.env = self.tmp / ".env"
+        self.env.write_text("")
+
+    def invoke(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(
+                ["--config", str(self.config), "--env-file", str(self.env), *argv]
+            )
+        return code, out.getvalue(), err.getvalue()
+
+    def test_an_empty_database_says_there_is_nothing_to_score(self):
+        code, out, _ = self.invoke("evaluate")
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("Nothing could be scored", out)
+
+    def test_it_scores_what_history_there_is(self):
+        with mock.patch.object(
+            cli, "make_fetcher", return_value=StubFetcher(default=700)
+        ):
+            for _ in range(6):
+                self.invoke("run")
+
+        code, out, _ = self.invoke("evaluate", "--horizons", "1")
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("Rolling-origin validation", out)
+        self.assertIn("naive", out)
+
+    def test_a_horizon_list_that_cannot_be_read_is_refused(self):
+        code, _, err = self.invoke("evaluate", "--horizons", "soon")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("Could not read", err)
+
+    def test_an_empty_horizon_list_is_refused(self):
+        code, _, err = self.invoke("evaluate", "--horizons", ",")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("at least one", err)
+
+
 if __name__ == "__main__":
     unittest.main()

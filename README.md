@@ -352,6 +352,104 @@ A holiday label is only applied within three weeks of the holiday. Wider than
 that and almost every date in the year gets one — at six weeks only a single
 day in 2026 came back clean, which makes the label meaningless.
 
+## The price model
+
+The dashed line on the chart, and the band around it, come from
+`flighttracker/model.py`. It is deliberately a small model, because the data it
+gets is small.
+
+### What it assumes
+
+Price is decomposed additively in log space:
+
+```
+log(price) = level[watch] + horizon(days before departure)
+           + holiday(departure) + weekday(departure) + noise
+```
+
+Working in logs makes every effect a *multiplier*, which is what fares actually
+behave like — "20% more at Christmas" holds across a $200 hop and a $2,000
+long-haul, whereas "$150 more" does not. It also means a watch's own price
+level drops out of every ratio the model reports, so watches of wildly
+different size can be pooled.
+
+Each term earns its place by keeping an influence *out of* the horizon curve.
+Without a holiday term, a watchlist full of Christmas trips would bend the
+advance-purchase shape into something that is really just a holiday premium.
+
+### How it is fitted
+
+By **backfitting**: estimate one component against what the others leave
+unexplained, cycle, repeat until nothing moves. Medians throughout, so a single
+badly scraped price cannot drag a component.
+
+Two things matter more than the loop itself.
+
+**Every estimate is shrunk toward a prior.** A bucket with four observations
+should not overrule a general pattern; a bucket with four hundred should. The
+weight is `n / (n + k)` with `k = 8`, so a component crosses from mostly-prior
+to mostly-data somewhere around a dozen observations. The horizon curve shrinks
+toward a published advance-purchase shape; holiday and weekday shrink toward
+*no effect*, which is the honest default — absent evidence, a date is not
+special.
+
+**Every component is anchored to its prior's gauge.** Only differences *within*
+a component are identifiable: add a constant to every horizon value, subtract
+it from every watch level, and the fit is exactly as good. Left free, that
+constant wanders — and because components are shrunk toward their priors on
+every pass while the levels are not, the wandering quietly bleeds the data's
+contribution away into the levels, one pass at a time. A holiday premium fitted
+without an anchor decays toward "no effect" the longer you run it. Re-centring
+each component so its sample-weighted mean matches its prior's fixes the gauge
+and leaves every ratio untouched. With it the fit converges in a handful of
+passes; without it, it never converges at all.
+
+### What it will not do
+
+- **It will not read your flight's recent slope into the future.** Only the
+  horizon component moves the line. Level, holiday and weekday are the same at
+  both ends of a fixed departure and cancel out.
+- **It will not pretend to certainty it lacks.** The band combines the noise a
+  price shows anyway — accumulating as a random walk, with a floor, because a
+  fare moves whether or not this tool has watched it move — with doubt about
+  the curve itself, which is larger wherever the estimate still leans on the
+  prior.
+- **It will not separate what your data cannot.** A holiday premium is only
+  distinguishable from a watch's own price level if some watch is seen on both
+  sides of it. Watch only Christmas trips and the model declines to guess.
+
+### Scoring it
+
+A model that is never checked is a claim, not a measurement.
+
+```bash
+flighttracker evaluate
+flighttracker evaluate --horizons 1,3,7,14,30
+```
+
+This is **rolling-origin validation**: walk forward through your history, and
+at each point refit the model on *only* what was knowable then, predict, and
+check against what actually happened. Three methods are scored on identical
+cases — the model, naive ("tomorrow's price is today's"), and the bare prior.
+
+It also reports how often the outcome landed inside the 80% band, which is the
+one number that says whether the uncertainty is honest.
+
+Read the output carefully, because it will tell you when it cannot tell you
+anything:
+
+```
+At 3d the comparison is not informative: only 1% of cases (1 of 128) span a
+change in the booking window, so the model is predicting no change — the naive
+prediction — almost everywhere. Both score 7.0%; neither is being tested.
+```
+
+That is the expected result for the first months of a new watchlist, and it is
+worth more than a flattering number would be. Over one to seven days the model
+and naive make the *same* prediction almost every time, so a tie between them
+measures nothing. The comparison becomes real once the history reaches far
+enough into the booking window for cases to span a change in it.
+
 ## The dashboard
 
 ```bash
@@ -364,28 +462,15 @@ deliberately one thing per watch: **what the price has been, and where it is
 projected to go.** A solid line for what was recorded, a dashed line for the
 projection, and a shaded band for how wrong that could be. Nothing else.
 
-The projection runs **all the way to departure**, and uses whichever source
-knows most about your flight:
-
-- **The booking-horizon curve built from your own watches** — what prices this
-  far out have actually gone on to do. Best, but it needs several watches
-  sitting at overlapping distances from departure before it can form.
-- **The typical advance-purchase pattern** otherwise. Fares sit high far out,
-  trough around six to eight weeks before departure, then climb steeply through
-  the last three. This is a general shape rather than your data, and the page
-  says so plainly — but it beats the alternative, which was a flat line that
-  told you nothing.
+The projection runs **all the way to departure**, and comes from the price
+model described below. The page always says how much of the curve is measured
+and how much is assumed, because early on it is nearly all assumed.
 
 A flight's own recent trend is deliberately **not** used for the line's
 geometry. A slope measured across ten days, carried out to a December
 departure, is drawing rather than forecasting. Where it is informative it is
 reported in words: *"Its own price has been drifting down about USD 40 a week
 over the last 10 days."*
-
-The band widens with the square root of time, as a random walk does, and never
-narrows below 3% — a fare that has held steady for a week is not thereby
-certain. A projection resting on the general pattern rather than your own data
-starts wider still, because it is an assumption about flights in general.
 
 The reasoning behind a buy signal still exists in the email digest and in
 `flighttracker signals`; it is just not on this page. The page keeps a
@@ -541,6 +626,8 @@ flighttracker/
   backfill.py   importing price history from SearchAPI
   holidays.py   US holidays by rule, and travel peak windows
   forecast.py   trend, step changes, the horizon curve, neighbouring dates
+  model.py      the additive price model: fitting, shrinkage, forecasting
+  evaluate.py   rolling-origin validation of the model against baselines
   digest.py     the email, text and HTML
   charts.py     the inline SVG chart, no dependencies
   dashboard.py  the self-contained HTML page
@@ -554,14 +641,19 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-318 tests, under a second, no network and no dependencies beyond PyYAML — the
-suite drives a stub fetcher, so it never touches Google Flights. That is
+375 tests, about ten seconds, no network and no dependencies beyond PyYAML —
+the suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.
 
 The holiday rules are checked against published calendars for past and future
-years, and the horizon curve is checked by feeding it a known shape and
-confirming it recovers it.
+years. The price model is checked by planting a known curve in synthetic prices
+and confirming it is recovered — including that watches at wildly different
+price levels do not distort it, that a planted holiday premium comes back at
+the size it went in, and that the answer does not depend on how long the fit is
+allowed to run. The validation harness is checked mostly for what it must
+refuse to look at: appending a wild future to the history must leave every
+score anchored before it completely unchanged.
 
 ## Not in v1
 

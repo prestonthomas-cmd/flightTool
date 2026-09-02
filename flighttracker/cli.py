@@ -23,6 +23,7 @@ from .backfill import SearchApiHistory, import_history
 from .backtest import format_result, format_sweep, run_backtest, sweep
 from .env import load_env_file
 from .errors import ConfigError, FlightTrackerError
+from .evaluate import evaluate_stored, format_evaluation
 from .fetch import GoogleFlightsFetcher
 from .health import check as check_health
 from .health import summarize as summarize_health
@@ -186,6 +187,29 @@ def _parser() -> argparse.ArgumentParser:
         help="compare several percentile thresholds side by side",
     )
     backtest.set_defaults(handler=_backtest)
+
+    evaluate = sub.add_parser(
+        "evaluate",
+        help="score the price model against baselines on stored history",
+    )
+    evaluate.add_argument(
+        "--horizons",
+        default="1,3,7,14",
+        help="days ahead to score, comma separated (default 1,3,7,14)",
+    )
+    evaluate.add_argument(
+        "--shrinkage",
+        type=float,
+        default=8.0,
+        help="how hard to pull thin estimates toward the prior (default 8)",
+    )
+    evaluate.add_argument(
+        "--min-train",
+        type=int,
+        default=12,
+        help="observations required before a prediction is scored (default 12)",
+    )
+    evaluate.set_defaults(handler=_evaluate)
 
     return parser
 
@@ -551,3 +575,29 @@ def _test_email(args) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _evaluate(args) -> int:
+    config = _load(args)
+    conn = connect(config.settings.db_path)
+
+    try:
+        horizons = tuple(
+            int(part) for part in args.horizons.split(",") if part.strip()
+        )
+    except ValueError:
+        print(f"Could not read --horizons {args.horizons!r}.", file=sys.stderr)
+        return EXIT_CONFIG
+    if not horizons:
+        print("--horizons needs at least one number.", file=sys.stderr)
+        return EXIT_CONFIG
+
+    result = evaluate_stored(
+        conn,
+        horizons=horizons,
+        shrinkage=args.shrinkage,
+        minimum_train=args.min_train,
+    )
+    for line in format_evaluation(result):
+        print(line)
+    return EXIT_OK

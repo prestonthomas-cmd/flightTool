@@ -16,7 +16,8 @@ from statistics import median as statistics_median
 
 from .charts import BandPoint, Point, history_and_forecast, money
 from .config import Config
-from .forecast import curve_for_watch, project
+from .forecast import project
+from .model import fit as fit_model
 from .run import evaluate_only
 from .signals import Verdict
 from .store import horizon_samples, parse_iso, run_history, source_counts
@@ -183,8 +184,9 @@ def render_body(conn: Connection, config: Config, now: datetime) -> str:
         f'<p class="sub">Last checked '
         f"{escape(now.strftime('%d %b %Y, %H:%M UTC'))}</p>",
     ]
+    model = fit_model(samples)
     for verdict in verdicts:
-        parts.append(_card(conn, config, verdict, samples, now))
+        parts.append(_card(conn, config, verdict, model, now))
     parts.append(
         "<footer>Prices are scraped from Google Flights and are a snapshot, not "
         "a quote. The projection is a description of the data so far, not a "
@@ -206,7 +208,7 @@ def render_document(conn: Connection, config: Config, now: datetime) -> str:
     )
 
 
-def _card(conn, config, verdict: Verdict, samples, now: datetime) -> str:
+def _card(conn, config, verdict: Verdict, model, now: datetime) -> str:
     watch = verdict.watch
     currency = verdict.currency
     history = run_history(conn, watch.id)
@@ -232,9 +234,8 @@ def _card(conn, config, verdict: Verdict, samples, now: datetime) -> str:
     else:
         parts.append('<p class="empty">No price returned in the latest run.</p>')
 
-    curve = curve_for_watch(samples, config.settings, watch.origin, watch.destination)
     projection = project(
-        history, watch, curve, config.settings, now,
+        history, watch, model, config.settings, now,
         price=verdict.price, currency=currency,
     )
     parts.append(_chart(history, projection, currency))

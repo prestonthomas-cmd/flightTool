@@ -221,12 +221,15 @@ class Rendering(unittest.TestCase):
         self.assertIn("Could be anywhere in here", html)
 
     def test_the_projection_says_where_its_shape_came_from(self):
+        """A reader must be able to tell assumption from measurement."""
         config = make_config(make_watch("tokyo"), min_trend_observations=4)
         self.track(config, [900, 880, 910, 870, 890, 875], 10)
         html = self.page(config, 10)
 
-        self.assertIn("typical advance-purchase pattern", html)
-        self.assertIn("not this flight&#x27;s own history", html)
+        self.assertIn("general advance-purchase pattern", html)
+        # Ten observations at one horizon: the curve is still nearly all prior,
+        # and the page has to say so rather than presenting it as measured.
+        self.assertIn("of this curve is yet drawn from your own", html)
 
     def test_a_watch_with_no_prices_draws_no_projection(self):
         config = make_config(make_watch("gone"))
