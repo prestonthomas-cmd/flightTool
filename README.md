@@ -77,9 +77,18 @@ changing your mind — `--purge` is there for when you don't.
 
 ### From a browser
 
-You do not need a terminal. **Actions → Add or remove a flight → Run
-workflow** gives you a form that edits the watchlist, commits it and rebuilds
-the dashboard. It works from a phone.
+You do not need a terminal. The dashboard carries a **+ Add or remove a
+flight** button in its header, which opens a form that edits the watchlist,
+commits it and rebuilds the page. It works from a phone.
+
+The button is a link rather than a control, because the dashboard is a static
+file on GitHub Pages and cannot write anything itself. The form it opens is
+`Actions → Add or remove a flight → Run workflow`, which you can also reach
+directly.
+
+Its target is worked out when the page is built: `GITHUB_REPOSITORY` in
+Actions, the `origin` remote otherwise. If neither is available the button is
+left off rather than rendered pointing nowhere.
 
 ### By hand
 
@@ -680,7 +689,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-412 tests, about seven seconds, no network and no dependencies beyond PyYAML —
+420 tests, about seven seconds, no network and no dependencies beyond PyYAML —
 the suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.

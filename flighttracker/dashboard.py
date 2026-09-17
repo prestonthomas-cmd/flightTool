@@ -9,9 +9,13 @@ a chart to answer.
 
 from __future__ import annotations
 
+import os
+import re
+import subprocess
 from datetime import datetime, timedelta
 from html import escape
 from sqlite3 import Connection
+from typing import Optional
 from statistics import median as statistics_median
 
 from .charts import BandPoint, Point, history_and_forecast, money
@@ -81,7 +85,16 @@ body {
 .wrap { max-width: 780px; margin: 0 auto; }
 h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -0.01em; }
 h2 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
-.sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+.sub { color: var(--muted); font-size: 13px; margin: 0; }
+
+.top { display: flex; flex-wrap: wrap; gap: 10px 16px;
+       align-items: baseline; justify-content: space-between; margin: 0 0 22px; }
+.manage {
+  display: inline-block; text-decoration: none; white-space: nowrap;
+  font-size: 13px; font-weight: 600; padding: 7px 13px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--chip); color: var(--ink);
+}
+.manage:hover { border-color: var(--series-1); color: var(--series-1); }
 
 .card {
   background: var(--surface);
@@ -171,16 +184,73 @@ SCRIPT = """
 """
 
 
-def render_body(conn: Connection, config: Config, now: datetime) -> str:
+# The page is a static file on GitHub Pages, so it cannot add a flight itself.
+# What it can do is link to the workflow that can — which is the difference
+# between "there is no way to do this" and "the way is one tap away".
+WORKFLOW = "watchlist.yml"
+SLUG = re.compile(r"[:/]([^/:]+/[^/]+?)(?:\.git)?/*$")
+
+
+def repo_slug() -> Optional[str]:
+    """`owner/repo` for this checkout, or None if it cannot be worked out.
+
+    Actions sets GITHUB_REPOSITORY, and that is where the published page is
+    built, so it is both the usual case and the one with the owner's exact
+    capitalisation. The git remote is the fallback for building the page by
+    hand.
+    """
+    from_env = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if from_env:
+        return from_env
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    found = SLUG.search(result.stdout.strip())
+    return found.group(1) if found else None
+
+
+def _manage_button(repo: Optional[str]) -> str:
+    """A link to the add/remove form, when we know where the repo lives."""
+    slug = repo if repo is not None else repo_slug()
+    if not slug:
+        return ""
+    href = f"https://github.com/{slug}/actions/workflows/{WORKFLOW}"
+    return (
+        f'<a class="manage" href="{escape(href, quote=True)}" '
+        'rel="noopener">+ Add or remove a flight</a>'
+    )
+
+
+def render_body(
+    conn: Connection,
+    config: Config,
+    now: datetime,
+    repo: Optional[str] = None,
+) -> str:
     verdicts = list(evaluate_only(config, conn, now))
     samples = horizon_samples(conn)
 
+    checked = escape(now.strftime("%d %b %Y, %H:%M UTC"))
     parts = [
         f"<style>{STYLE}</style>",
         '<div class="wrap">',
+        '<div class="top"><div>',
         "<h1>Flight Price Watch</h1>",
-        f'<p class="sub">Last checked '
-        f"{escape(now.strftime('%d %b %Y, %H:%M UTC'))}</p>",
+        f'<p class="sub">Last checked {checked}</p>',
+        "</div>",
+        _manage_button(repo),
+        "</div>",
     ]
     model = fit_model(samples)
     for verdict in verdicts:
@@ -190,13 +260,18 @@ def render_body(conn: Connection, config: Config, now: datetime) -> str:
     return "\n".join(parts)
 
 
-def render_document(conn: Connection, config: Config, now: datetime) -> str:
+def render_document(
+    conn: Connection,
+    config: Config,
+    now: datetime,
+    repo: Optional[str] = None,
+) -> str:
     return (
         '<!doctype html>\n<html lang="en">\n<head>\n'
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>Flight Price Watch</title>\n</head>\n<body>\n"
-        + render_body(conn, config, now)
+        + render_body(conn, config, now, repo)
         + "\n</body>\n</html>\n"
     )
 

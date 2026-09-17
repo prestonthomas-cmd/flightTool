@@ -1,8 +1,10 @@
 """The page is one chart per watch and nothing else. These tests hold it there."""
 
+import os
 import re
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from flighttracker.charts import (
     BandPoint,
@@ -11,7 +13,7 @@ from flighttracker.charts import (
     history_and_forecast,
     nice_step,
 )
-from flighttracker.dashboard import render_body, render_document
+from flighttracker.dashboard import render_body, render_document, repo_slug
 from flighttracker.run import execute_run
 from flighttracker.store import connect
 
@@ -126,12 +128,28 @@ class Rendering(unittest.TestCase):
         self.assertNotIn("<html", body.lower())
         self.assertIn("<style>", body)
 
-    def test_the_page_is_entirely_self_contained(self):
+    def test_the_page_loads_nothing_from_anywhere_else(self):
+        """It has to render with no network: opened from disk, or offline.
+
+        A link the reader can tap is not a load — it fetches nothing until
+        they choose to follow it — so anchors are allowed and resources are
+        not.
+        """
         config = make_config(make_watch("tokyo"))
         self.track(config, [900, 880, 910], 5)
         html = self.page(config, 5)
-        self.assertFalse(re.search(r'(src|href)="https?://', html))
-        self.assertNotIn("<link", html)
+
+        self.assertFalse(re.search(r'src="https?://', html), "remote resource")
+        self.assertFalse(re.search(r"@import|url\(\s*['\"]?https?://", html), "remote CSS")
+        for tag in ("<link", "<iframe", "<img", "<object", "<embed"):
+            self.assertNotIn(tag, html, f"{tag} loads something external")
+
+        # The only absolute URLs are anchors the reader can choose to follow.
+        for match in re.finditer(r'href="(https?://[^"]*)"', html):
+            start = html.rfind("<", 0, match.start())
+            self.assertTrue(
+                html[start:start + 2] == "<a", f"non-anchor href: {match.group(1)}"
+            )
 
     def test_the_page_is_a_chart_and_not_a_dashboard(self):
         """The point of the rewrite: everything else was removed on purpose."""
@@ -240,6 +258,76 @@ class Rendering(unittest.TestCase):
         html = render_document(self.conn, config, START)
         self.assertNotIn("series projected", html)
         self.assertNotIn("Could be anywhere in here", html)
+
+
+
+class TheAddRemoveButton(unittest.TestCase):
+    """The page cannot add a flight itself, so it links to what can."""
+
+    def setUp(self):
+        self.conn = connect(":memory:")
+        self.config = make_config(make_watch("tokyo"))
+
+    def page(self, repo):
+        return render_document(self.conn, self.config, START, repo=repo)
+
+    def test_it_links_to_the_add_remove_workflow(self):
+        html = self.page("someone/flightTool")
+        self.assertIn(
+            "https://github.com/someone/flightTool/actions/workflows/watchlist.yml",
+            html,
+        )
+        self.assertIn("Add or remove a flight", html)
+
+    def test_the_repo_name_keeps_the_capitalisation_it_was_given(self):
+        """GitHub redirects a lowercased path, but the canonical one is better."""
+        self.assertIn("someone/flightTool/actions", self.page("someone/flightTool"))
+
+    def test_a_repo_that_cannot_be_worked_out_leaves_the_button_off(self):
+        """Better no button than one that goes nowhere."""
+        html = self.page("")
+        self.assertNotIn("class=\"manage\"", html)
+        self.assertNotIn("actions/workflows", html)
+        # ...and the rest of the page is unaffected.
+        self.assertIn("Flight Price Watch", html)
+        self.assertIn("tokyo", html)
+
+    def test_the_href_is_escaped(self):
+        html = self.page('a"><script>x</script>/b')
+        self.assertNotIn("<script>x</script>", html)
+
+
+class WorkingOutTheRepo(unittest.TestCase):
+    def test_actions_supplies_it_directly(self):
+        with mock.patch.dict(
+            os.environ, {"GITHUB_REPOSITORY": "someone/flightTool"}, clear=False
+        ):
+            self.assertEqual(repo_slug(), "someone/flightTool")
+
+    def test_otherwise_it_comes_from_the_git_remote(self):
+        forms = {
+            "https://github.com/someone/flightTool.git": "someone/flightTool",
+            "https://github.com/someone/flightTool": "someone/flightTool",
+            "git@github.com:someone/flightTool.git": "someone/flightTool",
+            "ssh://git@github.com/someone/flightTool.git": "someone/flightTool",
+        }
+        for url, expected in forms.items():
+            with self.subTest(url=url):
+                with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": ""}), \
+                     mock.patch("subprocess.run") as run:
+                    run.return_value = mock.Mock(returncode=0, stdout=url + "\n")
+                    self.assertEqual(repo_slug(), expected)
+
+    def test_no_git_and_no_environment_means_no_repo(self):
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": ""}), \
+             mock.patch("subprocess.run", side_effect=OSError("no git")):
+            self.assertIsNone(repo_slug())
+
+    def test_a_failing_git_command_is_not_an_error(self):
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": ""}), \
+             mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=128, stdout="")
+            self.assertIsNone(repo_slug())
 
 
 if __name__ == "__main__":
