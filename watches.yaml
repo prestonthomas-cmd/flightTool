@@ -134,9 +134,3 @@ watches:
     depart_date_range: [2027-01-15, 2027-01-18]
     min_observations: 8
     percentile: 25
-
-  - id: button-smoke-test
-    origin: SFO
-    destination: LHR
-    depart_date_range: 2027-06-10
-    return_date_range: 2027-06-20
