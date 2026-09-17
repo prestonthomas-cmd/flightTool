@@ -75,20 +75,35 @@ Removing a flight **keeps its recorded prices**. Adding it back under the same
 id picks the history up where it left off, which is what you want after
 changing your mind — `--purge` is there for when you don't.
 
-### From a browser
+### From the dashboard
 
-You do not need a terminal. The dashboard carries a **+ Add or remove a
-flight** button in its header, which opens a form that edits the watchlist,
-commits it and rebuilds the page. It works from a phone.
+The dashboard has a **+ Add a flight** button in its header and a **×** on
+each watch. Both open a form, and both work from a phone.
 
-The button is a link rather than a control, because the dashboard is a static
-file on GitHub Pages and cannot write anything itself. The form it opens is
-`Actions → Add or remove a flight → Run workflow`, which you can also reach
-directly.
+The page is a static file on GitHub Pages, so it cannot edit the watchlist
+itself. What it does instead is ask GitHub to run the workflow that can — a
+`workflow_dispatch` API call the browser makes when you submit the form. The
+change takes a minute or two to appear, because the workflow has to run and
+the page has to be rebuilt.
 
-Its target is worked out when the page is built: `GITHUB_REPOSITORY` in
-Actions, the `origin` remote otherwise. If neither is available the button is
-left off rather than rendered pointing nowhere.
+**That call needs a token, and here is the honest tradeoff.** A public page
+cannot hold a secret, so the first time you change anything the page asks for
+a GitHub token and keeps it in your browser's `localStorage`. It is never
+written into the repository and never sent anywhere except `api.github.com`.
+
+Two things follow from that, and they are worth understanding before you use
+it:
+
+- **Use a fine-grained personal access token**, scoped to this one repository,
+  with `Actions: Read and write` and nothing else, and give it a short expiry.
+  Then the worst case is that someone can queue this one workflow.
+- **`localStorage` is shared across everything on `<you>.github.io`.** Every
+  GitHub Pages site under your account is the same browser origin, so any
+  other page you host there could read this token. If you host anything on
+  that domain you did not write, do not use this — use the CLI instead.
+
+The token is only needed for *changing* the watchlist. Reading the dashboard
+never asks for one.
 
 ### By hand
 
@@ -689,7 +704,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-420 tests, about seven seconds, no network and no dependencies beyond PyYAML —
+424 tests, about seven seconds, no network and no dependencies beyond PyYAML —
 the suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.

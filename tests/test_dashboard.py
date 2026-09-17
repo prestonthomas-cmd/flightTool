@@ -1,5 +1,6 @@
 """The page is one chart per watch and nothing else. These tests hold it there."""
 
+import json
 import os
 import re
 import unittest
@@ -261,40 +262,89 @@ class Rendering(unittest.TestCase):
 
 
 
-class TheAddRemoveButton(unittest.TestCase):
-    """The page cannot add a flight itself, so it links to what can."""
+class TheAddRemoveInterface(unittest.TestCase):
+    """The page cannot edit the watchlist itself. It asks GitHub to."""
 
     def setUp(self):
         self.conn = connect(":memory:")
-        self.config = make_config(make_watch("tokyo"))
+        self.config = make_config(make_watch("tokyo"), make_watch("lisbon"))
 
     def page(self, repo):
         return render_document(self.conn, self.config, START, repo=repo)
 
-    def test_it_links_to_the_add_remove_workflow(self):
+    def test_it_offers_a_button_to_add_and_one_per_watch_to_remove(self):
         html = self.page("someone/flightTool")
-        self.assertIn(
-            "https://github.com/someone/flightTool/actions/workflows/watchlist.yml",
-            html,
-        )
-        self.assertIn("Add or remove a flight", html)
+        self.assertIn("data-add", html)
+        self.assertIn('data-drop="tokyo"', html)
+        self.assertIn('data-drop="lisbon"', html)
 
-    def test_the_repo_name_keeps_the_capitalisation_it_was_given(self):
-        """GitHub redirects a lowercased path, but the canonical one is better."""
-        self.assertIn("someone/flightTool/actions", self.page("someone/flightTool"))
+    def test_it_carries_the_forms_they_open(self):
+        html = self.page("someone/flightTool")
+        for dialog in ("add-dialog", "drop-dialog", "key-dialog"):
+            self.assertIn(f'id="{dialog}"', html)
 
-    def test_a_repo_that_cannot_be_worked_out_leaves_the_button_off(self):
-        """Better no button than one that goes nowhere."""
+    def test_it_tells_the_script_which_repo_and_workflow_to_ask(self):
+        html = self.page("someone/flightTool")
+        found = re.search(r"window\.__watchlist = (\{.*?\});", html)
+        self.assertIsNotNone(found)
+        config = json.loads(found.group(1))
+        self.assertEqual(config["repo"], "someone/flightTool")
+        self.assertEqual(config["workflow"], "watchlist.yml")
+        self.assertEqual(config["ref"], "main")
+
+    def test_without_a_repo_the_whole_interface_is_left_off(self):
+        """Better no controls than controls that go nowhere."""
         html = self.page("")
-        self.assertNotIn("class=\"manage\"", html)
-        self.assertNotIn("actions/workflows", html)
-        # ...and the rest of the page is unaffected.
+        for absent in ("data-add", "data-drop", "<dialog", "__watchlist"):
+            self.assertNotIn(absent, html)
         self.assertIn("Flight Price Watch", html)
         self.assertIn("tokyo", html)
 
-    def test_the_href_is_escaped(self):
-        html = self.page('a"><script>x</script>/b')
-        self.assertNotIn("<script>x</script>", html)
+    def test_a_repo_name_that_is_not_one_is_refused(self):
+        """It is written into a script tag, so it is checked before it goes in."""
+        for hostile in (
+            'a"><script>alert(1)</script>/b',
+            "owner/repo</script><script>alert(1)</script>",
+            "owner/repo\u2028alert(1)",
+            "not-a-slug",
+            "too/many/parts",
+        ):
+            with self.subTest(repo=hostile):
+                html = self.page(hostile)
+                self.assertNotIn("__watchlist", html)
+                self.assertNotIn("alert(1)", html)
+
+    def test_the_config_cannot_break_out_of_its_script_tag(self):
+        """`json.dumps` escapes quotes but not `<`, which is not enough here."""
+        from flighttracker.dashboard import _script_json
+
+        encoded = _script_json({"repo": "x</script><script>alert(1)</script>"})
+        self.assertNotIn("</script>", encoded)
+        self.assertNotIn("<", encoded)
+        self.assertEqual(
+            json.loads(encoded)["repo"], "x</script><script>alert(1)</script>"
+        )
+
+    def test_the_token_lives_in_the_browser_and_not_in_the_page(self):
+        """It must never be baked into a file that gets committed."""
+        html = self.page("someone/flightTool")
+        self.assertIn("localStorage", html)
+
+        # The only mention of a token's shape is the input's placeholder.
+        for spelling in ("github_pat_", "ghp_"):
+            for found in re.finditer(re.escape(spelling), html):
+                line = html[html.rfind("\n", 0, found.start()) : found.end() + 40]
+                self.assertIn("placeholder", line, f"{spelling} outside a placeholder")
+
+        # ...and nothing that looks like a real token is assigned anywhere.
+        self.assertFalse(re.search(r"(token|key)\s*[:=]\s*['\"][A-Za-z0-9_]{12,}", html))
+
+    def test_it_only_ever_talks_to_the_github_api(self):
+        html = self.page("someone/flightTool")
+        for url in re.findall(r"'(https?://[^']+)'", html):
+            self.assertTrue(
+                url.startswith("https://api.github.com/"), f"unexpected host: {url}"
+            )
 
 
 class WorkingOutTheRepo(unittest.TestCase):

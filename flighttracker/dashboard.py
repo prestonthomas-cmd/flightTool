@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import json
 from datetime import datetime, timedelta
 from html import escape
 from sqlite3 import Connection
@@ -41,6 +42,7 @@ STYLE = """
   --border: rgba(11, 11, 11, 0.10);
   --series-1: #2a78d6;
   --good: #0ca30c;
+  --bad: #c7391f;
   --chip: rgba(11, 11, 11, 0.05);
 }
 @media (prefers-color-scheme: dark) {
@@ -56,6 +58,7 @@ STYLE = """
     --border: rgba(255, 255, 255, 0.10);
     --series-1: #3987e5;
     --good: #0ca30c;
+    --bad: #f0654a;
     --chip: rgba(255, 255, 255, 0.06);
   }
 }
@@ -71,6 +74,7 @@ STYLE = """
   --border: rgba(255, 255, 255, 0.10);
   --series-1: #3987e5;
   --good: #0ca30c;
+  --bad: #f0654a;
   --chip: rgba(255, 255, 255, 0.06);
 }
 
@@ -89,13 +93,6 @@ h2 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
 
 .top { display: flex; flex-wrap: wrap; gap: 10px 16px;
        align-items: baseline; justify-content: space-between; margin: 0 0 22px; }
-.manage {
-  display: inline-block; text-decoration: none; white-space: nowrap;
-  font-size: 13px; font-weight: 600; padding: 7px 13px; border-radius: 8px;
-  border: 1px solid var(--border); background: var(--chip); color: var(--ink);
-}
-.manage:hover { border-color: var(--series-1); color: var(--series-1); }
-
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -159,6 +156,61 @@ a { color: var(--series-1); }
 :focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { #tip { transition: none; } }
 
+/* --- the add/remove interface ------------------------------------------- */
+.manage {
+  font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap;
+  padding: 7px 13px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--chip); color: var(--ink);
+}
+.manage:hover { border-color: var(--series-1); color: var(--series-1); }
+
+.drop {
+  font: inherit; font-size: 18px; line-height: 1; cursor: pointer;
+  padding: 2px 8px 4px; border-radius: 6px; color: var(--muted);
+  border: 1px solid transparent; background: none;
+}
+.drop:hover { color: var(--bad); border-color: var(--border); }
+
+dialog {
+  border: 1px solid var(--border); border-radius: 12px; padding: 0;
+  background: var(--surface); color: var(--ink); max-width: 420px; width: 92vw;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog .inner { padding: 20px; }
+dialog h3 { margin: 0 0 4px; font-size: 17px; letter-spacing: -0.01em; }
+dialog .why { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+
+.field { margin: 0 0 12px; }
+.field label { display: block; font-size: 12px; color: var(--ink-2);
+               margin: 0 0 4px; font-weight: 600; }
+.field input, .field select {
+  font: inherit; font-size: 15px; width: 100%; padding: 8px 10px;
+  border-radius: 7px; border: 1px solid var(--border);
+  background: var(--page); color: var(--ink);
+}
+.pair { display: flex; gap: 10px; }
+.pair .field { flex: 1; }
+.check { display: flex; align-items: center; gap: 8px; margin: 0 0 14px;
+         font-size: 14px; color: var(--ink-2); }
+.check input { width: auto; }
+
+.actions { display: flex; gap: 8px; justify-content: flex-end; margin: 18px 0 0; }
+.actions button {
+  font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  padding: 8px 15px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--chip); color: var(--ink);
+}
+.actions .go { background: var(--series-1); border-color: transparent; color: #fff; }
+.actions .go:disabled { opacity: 0.55; cursor: progress; }
+.actions .danger { background: var(--bad); border-color: transparent; color: #fff; }
+
+.said { font-size: 13px; margin: 14px 0 0; padding: 10px 12px; border-radius: 8px;
+        background: var(--chip); color: var(--ink-2); }
+.said.bad { color: var(--bad); }
+.said:empty { display: none; }
+dialog code { font-size: 12px; background: var(--chip); padding: 1px 5px;
+              border-radius: 4px; }
+
 #tip {
   position: fixed; pointer-events: none; opacity: 0; transition: opacity .08s;
   background: var(--ink); color: var(--page); padding: 6px 9px;
@@ -180,6 +232,269 @@ SCRIPT = """
     tip.style.left = x + 'px';
     tip.style.top = y + 'px';
   });
+})();
+"""
+
+
+# The page is a static file: it cannot edit the watchlist itself. What it can
+# do is ask GitHub to run the workflow that does, which is a plain HTTPS call
+# the browser makes on the reader's behalf. That needs a token, and a public
+# page cannot hold a secret — so the reader supplies one and it is kept in
+# their own browser, never in the repository.
+DIALOGS = """
+<dialog id="add-dialog"><form method="dialog" class="inner" id="add-form">
+<h3>Add a flight</h3>
+<p class="why">It starts collecting prices on the next run.</p>
+<div class="pair">
+  <div class="field"><label for="f-from">From</label>
+    <input id="f-from" name="from" placeholder="JFK" maxlength="3" required
+           autocapitalize="characters" autocomplete="off"></div>
+  <div class="field"><label for="f-to">To</label>
+    <input id="f-to" name="to" placeholder="HND" maxlength="3" required
+           autocapitalize="characters" autocomplete="off"></div>
+</div>
+<div class="pair">
+  <div class="field"><label for="f-out">Depart</label>
+    <input id="f-out" name="out" type="date" required></div>
+  <div class="field"><label for="f-back">Return <span class="why">optional</span></label>
+    <input id="f-back" name="back" type="date"></div>
+</div>
+<div class="pair">
+  <div class="field"><label for="f-cabin">Cabin</label>
+    <select id="f-cabin" name="cabin">
+      <option value="economy">Economy</option>
+      <option value="premium-economy">Premium economy</option>
+      <option value="business">Business</option>
+      <option value="first">First</option>
+    </select></div>
+  <div class="field"><label for="f-adults">Adults</label>
+    <input id="f-adults" name="adults" type="number" min="1" max="9" value="1"></div>
+</div>
+<div class="field"><label for="f-max">Always alert below <span class="why">optional</span></label>
+  <input id="f-max" name="max" type="number" min="1" placeholder="900"></div>
+<label class="check"><input type="checkbox" id="f-nonstop" name="nonstop">
+  Nonstop only</label>
+<p class="said" id="add-said"></p>
+<div class="actions">
+  <button type="button" data-close>Cancel</button>
+  <button type="submit" class="go">Add flight</button>
+</div>
+</form></dialog>
+
+<dialog id="drop-dialog"><form method="dialog" class="inner" id="drop-form">
+<h3>Stop tracking this flight?</h3>
+<p class="why" id="drop-what"></p>
+<label class="check"><input type="checkbox" id="drop-purge">
+  Also delete its recorded prices</label>
+<p class="why">Leave that unticked and the history is kept, so adding the
+flight back later picks up where it left off.</p>
+<p class="said" id="drop-said"></p>
+<div class="actions">
+  <button type="button" data-close>Cancel</button>
+  <button type="submit" class="go danger">Stop tracking</button>
+</div>
+</form></dialog>
+
+<dialog id="key-dialog"><form method="dialog" class="inner" id="key-form">
+<h3>One-time setup</h3>
+<p class="why">Changing the watchlist means asking GitHub to run a workflow,
+which needs a token. It is stored in this browser only — never in the
+repository, and never sent anywhere except GitHub.</p>
+<p class="why">Create a <b>fine-grained personal access token</b> scoped to
+this one repository, with <code>Actions: Read and write</code>. Give it a
+short expiry.</p>
+<div class="field"><label for="f-key">Token</label>
+  <input id="f-key" type="password" placeholder="github_pat_..." required
+         autocomplete="off" spellcheck="false"></div>
+<p class="said" id="key-said"></p>
+<div class="actions">
+  <button type="button" data-close>Cancel</button>
+  <button type="submit" class="go">Save</button>
+</div>
+</form></dialog>
+"""
+
+MANAGE_SCRIPT = """
+(function () {
+  var config = window.__watchlist;
+  if (!config) { return; }
+
+  var STORE = 'flighttracker.token';
+  var byId = function (id) { return document.getElementById(id); };
+
+  // The token lives in this browser. Reading it can throw in private mode or
+  // with site data blocked, so every access is guarded and the page still
+  // works without it — it just asks again.
+  function token(value) {
+    try {
+      if (value === undefined) { return window.localStorage.getItem(STORE); }
+      if (value === null) { window.localStorage.removeItem(STORE); }
+      else { window.localStorage.setItem(STORE, value); }
+    } catch (e) { return null; }
+    return value;
+  }
+
+  function say(node, text, bad) {
+    node.textContent = text || '';
+    node.className = bad ? 'said bad' : 'said';
+  }
+
+  function dispatch(inputs) {
+    var key = token();
+    if (!key) { return Promise.reject(new Error('no-token')); }
+    var url = 'https://api.github.com/repos/' + config.repo +
+              '/actions/workflows/' + config.workflow + '/dispatches';
+    // Every input must be a string: the workflow_dispatch API rejects
+    // anything else, including real booleans.
+    var body = {};
+    Object.keys(inputs).forEach(function (name) {
+      body[name] = String(inputs[name]);
+    });
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + key,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      },
+      body: JSON.stringify({ ref: config.ref, inputs: body })
+    }).then(function (response) {
+      if (response.status === 204) { return; }
+      if (response.status === 401 || response.status === 403) {
+        token(null);
+        throw new Error('The token was rejected. It may be expired, or ' +
+                        'missing the Actions: Read and write permission.');
+      }
+      return response.json().catch(function () { return {}; })
+        .then(function (data) {
+          throw new Error(data.message || ('GitHub said ' + response.status));
+        });
+    });
+  }
+
+  var pending = null;
+
+  function withToken(run) {
+    if (token()) { run(); return; }
+    pending = run;
+    byId('key-dialog').showModal();
+  }
+
+  function submitter(form) {
+    return form.querySelector('button[type="submit"]');
+  }
+
+  function run(form, said, inputs, done) {
+    var button = submitter(form);
+    button.disabled = true;
+    say(said, 'Asking GitHub to run it...');
+    dispatch(inputs).then(function () {
+      say(said, 'Queued. It takes a minute or two, then reload this page.');
+      button.disabled = false;
+      if (done) { done(); }
+    }).catch(function (error) {
+      button.disabled = false;
+      if (error.message === 'no-token') {
+        say(said, '');
+        withToken(function () { run(form, said, inputs, done); });
+        return;
+      }
+      say(said, error.message, true);
+    });
+  }
+
+  // --- the token prompt ----------------------------------------------------
+  byId('key-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var value = byId('f-key').value.trim();
+    if (!value) { return; }
+    token(value);
+    byId('f-key').value = '';
+    say(byId('key-said'), '');
+    byId('key-dialog').close();
+    var next = pending; pending = null;
+    if (next) { next(); }
+  });
+
+  // --- adding --------------------------------------------------------------
+  var addDialog = byId('add-dialog');
+  Array.prototype.forEach.call(
+    document.querySelectorAll('[data-add]'),
+    function (button) {
+      button.addEventListener('click', function () {
+        say(byId('add-said'), '');
+        addDialog.showModal();
+      });
+    }
+  );
+
+  byId('add-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var form = event.target;
+    var said = byId('add-said');
+    var from = form.elements.from.value.trim().toUpperCase();
+    var to = form.elements.to.value.trim().toUpperCase();
+    var out = form.elements.out.value;
+    var back = form.elements.back.value;
+
+    if (!/^[A-Z]{3}$/.test(from) || !/^[A-Z]{3}$/.test(to)) {
+      say(said, 'Airports are three-letter codes, like JFK.', true); return;
+    }
+    if (!out) { say(said, 'Pick a departure date.', true); return; }
+    if (back && back < out) {
+      say(said, 'The return date is before the departure date.', true); return;
+    }
+
+    run(form, said, {
+      action: 'add',
+      route: from + '-' + to + ':' + out,
+      returning: back,
+      watch_id: '',
+      cabin: form.elements.cabin.value,
+      adults: form.elements.adults.value || '1',
+      nonstop: byId('f-nonstop').checked,
+      max_price: form.elements.max.value,
+      purge: false
+    }, function () { form.reset(); });
+  });
+
+  // --- removing ------------------------------------------------------------
+  var dropDialog = byId('drop-dialog');
+  var dropping = '';
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll('[data-drop]'),
+    function (button) {
+      button.addEventListener('click', function () {
+        dropping = button.getAttribute('data-drop');
+        byId('drop-what').textContent = button.getAttribute('data-label');
+        byId('drop-purge').checked = false;
+        say(byId('drop-said'), '');
+        dropDialog.showModal();
+      });
+    }
+  );
+
+  byId('drop-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!dropping) { return; }
+    run(event.target, byId('drop-said'), {
+      action: 'remove',
+      watch_id: dropping,
+      purge: byId('drop-purge').checked,
+      route: '', returning: '', cabin: 'economy',
+      adults: '1', nonstop: false, max_price: ''
+    });
+  });
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll('dialog [data-close]'),
+    function (button) {
+      button.addEventListener('click', function () {
+        button.closest('dialog').close();
+      });
+    }
+  );
 })();
 """
 
@@ -220,15 +535,51 @@ def repo_slug() -> Optional[str]:
     return found.group(1) if found else None
 
 
-def _manage_button(repo: Optional[str]) -> str:
-    """A link to the add/remove form, when we know where the repo lives."""
-    slug = repo if repo is not None else repo_slug()
+# GitHub allows letters, digits, dot, dash and underscore in both halves. The
+# page keeps a token for this repo in the reader's browser, so anything that
+# could break out of the script tag below would be worth real money to steal —
+# the value is checked against this before it is written anywhere.
+VALID_SLUG = re.compile(r"^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$")
+
+
+def _usable_slug(slug: Optional[str]) -> Optional[str]:
+    return slug if slug and VALID_SLUG.match(slug) else None
+
+
+def _script_json(value: object) -> str:
+    """JSON safe to inline in a <script> block.
+
+    `json.dumps` escapes quotes but leaves `<` alone, so a string containing
+    `</script>` would close the tag early and anything after it would run as
+    markup. Escaping the angle brackets and the two line separators JavaScript
+    treats as newlines closes that off.
+    """
+    encoded = json.dumps(value)
+    for raw, safe in (
+        ("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
+        ("\u2028", "\\u2028"), ("\u2029", "\\u2029"),
+    ):
+        encoded = encoded.replace(raw, safe)
+    return encoded
+
+
+def _manage_button(slug: Optional[str]) -> str:
+    """The button that opens the add form. Absent when there is no repo."""
+    if not _usable_slug(slug):
+        return ""
+    return '<button type="button" class="manage" data-add>+ Add a flight</button>'
+
+
+def _manage_tail(slug: Optional[str], branch: str = "main") -> str:
+    """The dialogs and the script behind them, for the end of the page."""
+    slug = _usable_slug(slug)
     if not slug:
         return ""
-    href = f"https://github.com/{slug}/actions/workflows/{WORKFLOW}"
+    config = {"repo": slug, "workflow": WORKFLOW, "ref": branch}
     return (
-        f'<a class="manage" href="{escape(href, quote=True)}" '
-        'rel="noopener">+ Add or remove a flight</a>'
+        DIALOGS
+        + f"<script>window.__watchlist = {_script_json(config)};</script>"
+        + f"<script>{MANAGE_SCRIPT}</script>"
     )
 
 
@@ -241,6 +592,7 @@ def render_body(
     verdicts = list(evaluate_only(config, conn, now))
     samples = horizon_samples(conn)
 
+    slug = repo if repo is not None else repo_slug()
     checked = escape(now.strftime("%d %b %Y, %H:%M UTC"))
     parts = [
         f"<style>{STYLE}</style>",
@@ -249,14 +601,17 @@ def render_body(
         "<h1>Flight Price Watch</h1>",
         f'<p class="sub">Last checked {checked}</p>',
         "</div>",
-        _manage_button(repo),
+        _manage_button(slug),
         "</div>",
     ]
     model = fit_model(samples)
     for verdict in verdicts:
-        parts.append(_card(conn, config, verdict, model, now))
+        parts.append(
+            _card(conn, config, verdict, model, now, bool(_usable_slug(slug)))
+        )
     parts.append('</div><div id="tip"></div>')
     parts.append(f"<script>{SCRIPT}</script>")
+    parts.append(_manage_tail(slug))
     return "\n".join(parts)
 
 
@@ -276,20 +631,31 @@ def render_document(
     )
 
 
-def _card(conn, config, verdict: Verdict, model, now: datetime) -> str:
+def _card(
+    conn, config, verdict: Verdict, model, now: datetime, manageable: bool = False
+) -> str:
     watch = verdict.watch
     currency = verdict.currency
     history = run_history(conn, watch.id)
 
     pill = '<span class="pill buy">Buy signal</span>' if verdict.flagged else ""
     tone = " flagged" if verdict.flagged else ""
+    drop = (
+        f'<button type="button" class="drop" data-drop="{escape(watch.id, quote=True)}"'
+        f' data-label="{escape(watch.name, quote=True)} · '
+        f'{escape(watch.route, quote=True)}"'
+        f' title="Stop tracking" aria-label="Stop tracking {escape(watch.name, quote=True)}"'
+        ">&times;</button>"
+        if manageable
+        else ""
+    )
 
     parts = [
         f'<section class="card{tone}">',
         '<div class="head"><div>',
         f"<h2>{escape(watch.name)}</h2>",
         f'<p class="route">{escape(watch.route)} · {escape(watch.cabin)}</p>',
-        f"</div>{pill}</div>",
+        f"</div><div>{pill}{drop}</div></div>",
     ]
 
     if verdict.price is not None:
