@@ -250,8 +250,16 @@ class ReportingProblems(unittest.TestCase):
             "unknown key 'max_price'",
         )
 
-    def test_an_empty_watchlist_is_refused(self):
-        self.assertProblem("watches: []", "nothing to track")
+    def test_a_missing_watches_key_is_refused(self):
+        self.assertProblem("settings:\n  currency: USD", "nothing to track")
+
+    def test_an_empty_watchlist_loads_because_removing_the_last_one_makes_it(self):
+        """`remove` leaves this behind, and `add` has to work from here."""
+        for text in ("watches: []", "watches:"):
+            with self.subTest(text=text):
+                path = self.tmp / "empty.yaml"
+                path.write_text(text + "\n")
+                self.assertEqual(load_config(path).watches, ())
 
     def test_a_missing_file_is_reported_clearly(self):
         with self.assertRaises(ConfigError) as caught:

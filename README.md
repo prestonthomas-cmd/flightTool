@@ -42,7 +42,10 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env                   # then fill in SMTP details
-$EDITOR watches.yaml                   # replace the example trips with yours
+
+flighttracker list                     # the three example trips it ships with
+flighttracker remove nyc-to-tokyo-dec  # drop one
+flighttracker add JFK-HND:2026-12-10 --return 2026-12-24   # add your own
 
 flighttracker validate      # check the watchlist, see what each run will do
 flighttracker run --dry-run # fetch real prices, print the digest, store nothing
@@ -51,11 +54,39 @@ flighttracker run           # the real thing
 
 Without installing, every command also works as `python -m flighttracker ...`.
 
-## The watchlist
+## Adding and removing flights
 
-`watches.yaml` is the only file you edit. It ships with the three example
-watches so the scheduled workflows do something on their first run — replace
-them with trips you care about, since every watch is scraped on every run.
+```bash
+flighttracker list                       # what is tracked, and how much data each has
+flighttracker add JFK-HND:2026-12-10     # one-way
+flighttracker add JFK-HND:2026-12-10 --return 2026-12-24
+flighttracker add JFK-HND:2026-12-10..2026-12-20 --return 2026-12-24..2027-01-03 \
+    --nights 14..16 --cabin business --adults 2 --nonstop --max-price 2500
+flighttracker remove nyc-to-tokyo-dec    # stop tracking, keep the prices
+flighttracker remove nyc-to-tokyo-dec --purge   # ...and delete them
+```
+
+A route is `ORIGIN-DESTINATION:when`, where `when` is a date or an `a..b`
+range. Ranges on both ends multiply, so `--nights` narrows them to the trip
+lengths you would actually take. The id is derived from the route unless you
+pass `--id`.
+
+Removing a flight **keeps its recorded prices**. Adding it back under the same
+id picks the history up where it left off, which is what you want after
+changing your mind — `--purge` is there for when you don't.
+
+### From a browser
+
+You do not need a terminal. **Actions → Add or remove a flight → Run
+workflow** gives you a form that edits the watchlist, commits it and rebuilds
+the dashboard. It works from a phone.
+
+### By hand
+
+`watches.yaml` is still an ordinary file you can edit directly, and the
+commands above are careful to leave the rest of it — comments, settings,
+formatting — exactly as they found it. Every edit is re-parsed before it is
+saved, so a file that would not load is never written.
 `watches.example.yaml` keeps a pristine annotated copy. This is the shape:
 
 ```yaml
@@ -460,7 +491,14 @@ flighttracker dashboard --out ~/flights.html  # anywhere you like
 One self-contained HTML file — no server, no build step, nothing fetched — and
 deliberately one thing per watch: **what the price has been, and where it is
 projected to go.** A solid line for what was recorded, a dashed line for the
-projection, and a shaded band for how wrong that could be. Nothing else.
+projection, and a shaded band for how wrong that could be. Nothing else: no
+explanatory prose, no disclaimers, no commentary. The reasoning lives here in
+the README, and in the email digest.
+
+One consequence worth knowing: the page used to say, under every chart, how
+much of the projection was measured from your own data and how much was still
+assumption. That sentence is gone. `flighttracker evaluate` is now the place
+that answers it.
 
 The projection runs **all the way to departure**, and comes from the price
 model described below. The page always says how much of the curve is measured
@@ -626,6 +664,7 @@ flighttracker/
   backfill.py   importing price history from SearchAPI
   holidays.py   US holidays by rule, and travel peak windows
   forecast.py   trend, step changes, the horizon curve, neighbouring dates
+  watchlist.py  adding and removing watches without disturbing the file
   model.py      the additive price model: fitting, shrinkage, forecasting
   evaluate.py   rolling-origin validation of the model against baselines
   digest.py     the email, text and HTML
@@ -641,7 +680,7 @@ flighttracker/
 python -m unittest discover -s tests -t . -v
 ```
 
-375 tests, about ten seconds, no network and no dependencies beyond PyYAML —
+412 tests, about seven seconds, no network and no dependencies beyond PyYAML —
 the suite drives a stub fetcher, so it never touches Google Flights. That is
 deliberate: the scraper is the part most likely to break, and a test suite that
 depended on it would be useless exactly when you needed it.
@@ -653,7 +692,9 @@ price levels do not distort it, that a planted holiday premium comes back at
 the size it went in, and that the answer does not depend on how long the fit is
 allowed to run. The validation harness is checked mostly for what it must
 refuse to look at: appending a wild future to the history must leave every
-score anchored before it completely unchanged.
+score anchored before it completely unchanged. The watchlist editor is held to
+one standard above all: adding a flight and removing it again must leave the
+file byte for byte as it was.
 
 ## Not in v1
 

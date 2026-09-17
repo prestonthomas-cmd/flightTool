@@ -134,7 +134,6 @@ h2 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
 .key.band { height: 10px; border: none; background: var(--series-1);
             opacity: 0.22; border-radius: 2px; }
 
-.note { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
 .empty { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 details { margin: 10px 0 0; }
 summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
@@ -146,7 +145,6 @@ th { color: var(--muted); font-weight: 600; }
 a { color: var(--series-1); }
 :focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { #tip { transition: none; } }
-footer { color: var(--muted); font-size: 12px; margin: 24px 0 0; }
 
 #tip {
   position: fixed; pointer-events: none; opacity: 0; transition: opacity .08s;
@@ -187,11 +185,6 @@ def render_body(conn: Connection, config: Config, now: datetime) -> str:
     model = fit_model(samples)
     for verdict in verdicts:
         parts.append(_card(conn, config, verdict, model, now))
-    parts.append(
-        "<footer>Prices are scraped from Google Flights and are a snapshot, not "
-        "a quote. The projection is a description of the data so far, not a "
-        "promise — the shaded band is how much it could be wrong by.</footer>"
-    )
     parts.append('</div><div id="tip"></div>')
     parts.append(f"<script>{SCRIPT}</script>")
     return "\n".join(parts)
@@ -243,13 +236,10 @@ def _card(conn, config, verdict: Verdict, model, now: datetime) -> str:
         '<div class="legend">'
         '<span><i class="key"></i>Recorded</span>'
         '<span><i class="key dashed"></i>Projected</span>'
-        '<span><i class="key band"></i>Could be anywhere in here</span></div>'
+        '<span><i class="key band"></i>Range</span></div>'
         if projection.usable
         else ""
     )
-    if projection.note:
-        parts.append(f'<p class="note">{escape(projection.note)}</p>')
-
     parts.append(_table(history, conn, watch.id, currency))
     parts.append("</section>")
     return "".join(parts)

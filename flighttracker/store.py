@@ -426,3 +426,29 @@ def source_counts(conn: sqlite3.Connection, watch_id: str) -> dict[str, int]:
             (watch_id,),
         )
     }
+
+
+def observation_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """How many prices are stored per watch, including watches since removed."""
+    rows = conn.execute(
+        "SELECT watch_id, COUNT(*) FROM price_history GROUP BY watch_id"
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def forget_watch(conn: sqlite3.Connection, watch_id: str) -> int:
+    """Delete everything recorded for a watch. Returns the prices removed."""
+    with conn:
+        deleted = conn.execute(
+            "DELETE FROM price_history WHERE watch_id = ?", (watch_id,)
+        ).rowcount
+        for table in ("alerts", "fetch_errors"):
+            if _table_exists(conn, table):
+                conn.execute(f"DELETE FROM {table} WHERE watch_id = ?", (watch_id,))
+    return deleted
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone() is not None

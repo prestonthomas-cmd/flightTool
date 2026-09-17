@@ -221,15 +221,19 @@ def load_config(path: os.PathLike | str) -> Config:
     problems: list[str] = []
     settings = _parse_settings(raw.get("settings") or {}, problems, path)
 
+    # A file with no `watches:` key at all is malformed. A `watches:` key with
+    # nothing under it is not: it is what `flighttracker remove` leaves behind
+    # when the last flight is dropped, and adding one back has to work from
+    # there. Commands that need a watch say so themselves.
     entries = raw.get("watches")
-    if entries is None:
+    if "watches" not in raw:
         problems.append("no `watches:` key — nothing to track")
+        entries = []
+    elif entries is None:
         entries = []
     elif not isinstance(entries, list):
         problems.append("`watches:` should be a list")
         entries = []
-    elif not entries:
-        problems.append("`watches:` is empty — nothing to track")
 
     watches: list[Watch] = []
     seen: set[str] = set()

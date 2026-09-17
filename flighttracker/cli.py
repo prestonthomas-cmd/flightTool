@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -30,12 +31,17 @@ from .health import summarize as summarize_health
 from .run import commit_alerts, evaluate_only, execute_run
 from .store import (
     connect,
+    forget_watch,
     latest_run,
+    observation_counts,
     observations_for_run,
     parse_iso,
     run_history,
     utc_now,
 )
+from .watchlist import CABINS, NewWatch
+from .watchlist import add as add_watch
+from .watchlist import remove as remove_watch
 
 DEFAULT_CONFIG = "watches.yaml"
 
@@ -210,6 +216,43 @@ def _parser() -> argparse.ArgumentParser:
         help="observations required before a prediction is scored (default 12)",
     )
     evaluate.set_defaults(handler=_evaluate)
+
+    add = sub.add_parser("add", help="start tracking a flight")
+    add.add_argument("route", help="where and when, e.g. JFK-HND:2026-12-10")
+    add.add_argument(
+        "--return",
+        dest="returning",
+        default=None,
+        help="return date, or a range like 2026-12-24..2027-01-03 (omit for one-way)",
+    )
+    add.add_argument("--id", default=None, help="short name (default: from the route)")
+    add.add_argument("--label", default=None, help="how it reads in the digest")
+    add.add_argument(
+        "--cabin", default="economy", choices=CABINS, help="default: economy"
+    )
+    add.add_argument("--adults", type=int, default=1, help="default: 1")
+    add.add_argument("--nonstop", action="store_true", help="nonstop flights only")
+    add.add_argument(
+        "--max-price", type=float, default=None, help="email me below this, always"
+    )
+    add.add_argument(
+        "--nights",
+        default=None,
+        help="trip lengths to keep when both dates are ranges, e.g. 14..16",
+    )
+    add.set_defaults(handler=_add)
+
+    drop = sub.add_parser("remove", help="stop tracking a flight")
+    drop.add_argument("watch_id", help="the id shown by `list`")
+    drop.add_argument(
+        "--purge",
+        action="store_true",
+        help="also delete its recorded prices (they are kept by default)",
+    )
+    drop.set_defaults(handler=_remove)
+
+    listing = sub.add_parser("list", help="show what is being tracked")
+    listing.set_defaults(handler=_list)
 
     return parser
 
@@ -600,4 +643,118 @@ def _evaluate(args) -> int:
     )
     for line in format_evaluation(result):
         print(line)
+    return EXIT_OK
+
+
+def _parse_days(text: str, what: str) -> tuple[date, ...]:
+    """A single date, or a `first..last` range."""
+    parts = [part.strip() for part in text.split("..") if part.strip()]
+    if not 1 <= len(parts) <= 2:
+        raise ConfigError(f"Could not read {what} {text!r}. Use a date, or a..b.")
+    try:
+        days = tuple(date.fromisoformat(part) for part in parts)
+    except ValueError:
+        raise ConfigError(
+            f"Could not read {what} {text!r}. Dates look like 2026-12-10."
+        ) from None
+    if len(days) == 2 and days[1] < days[0]:
+        raise ConfigError(f"The {what} range ends before it starts: {text!r}.")
+    return days
+
+
+def _parse_route(text: str) -> tuple[str, str, tuple[date, ...]]:
+    """`JFK-HND:2026-12-10` or `JFK-HND:2026-12-10..2026-12-20`."""
+    airports, _, when = text.partition(":")
+    origin, _, destination = airports.partition("-")
+    origin, destination = origin.strip().upper(), destination.strip().upper()
+
+    if not origin or not destination or not when.strip():
+        raise ConfigError(
+            f"Could not read the route {text!r}. It looks like "
+            "JFK-HND:2026-12-10, or JFK-HND:2026-12-10..2026-12-20 for a range."
+        )
+    for code in (origin, destination):
+        if not (code.isalpha() and len(code) == 3):
+            raise ConfigError(f"{code!r} is not a three-letter airport code.")
+    return origin, destination, _parse_days(when, "departure")
+
+
+def _add(args) -> int:
+    config = _load(args)
+    origin, destination, depart = _parse_route(args.route)
+    returning = (
+        _parse_days(args.returning, "return date") if args.returning else None
+    )
+    if returning and returning[0] < depart[0]:
+        raise ConfigError("The return date is before the departure date.")
+
+    nights = None
+    if args.nights:
+        low, _, high = args.nights.partition("..")
+        try:
+            nights = (int(low), int(high or low))
+        except ValueError:
+            raise ConfigError(
+                f"Could not read --nights {args.nights!r}. Use 14, or 14..16."
+            ) from None
+
+    watch = NewWatch(
+        id=args.id or f"{origin}-{destination}-{depart[0]:%b%Y}".lower(),
+        origin=origin,
+        destination=destination,
+        depart=depart,
+        returns=returning,
+        cabin=args.cabin,
+        label=args.label,
+        max_price=args.max_price,
+        max_stops=0 if args.nonstop else None,
+        adults=args.adults,
+        trip_length_nights=nights,
+    )
+    add_watch(config.source, watch)
+
+    fresh = _load(args)
+    added = next(w for w in fresh.watches if w.id == watch.id)
+    searches = len(added.searches())
+    print(f"Tracking {added.name}  [{added.id}]")
+    print(f"  {added.route}, {added.cabin}, {added.passengers.total} passenger(s)")
+    print(f"  {searches} search(es) per run")
+    print()
+    print("It starts collecting on the next run. To price it now: flighttracker run")
+    return EXIT_OK
+
+
+def _remove(args) -> int:
+    config = _load(args)
+    remove_watch(config.source, args.watch_id)
+    print(f"Stopped tracking {args.watch_id}.")
+
+    if args.purge:
+        conn = connect(config.settings.db_path)
+        deleted = forget_watch(conn, args.watch_id)
+        print(f"Deleted {deleted} recorded price(s).")
+    else:
+        print(
+            "Its recorded prices are kept, so adding it back under the same id "
+            "resumes its history. Use --purge to delete them."
+        )
+    return EXIT_OK
+
+
+def _list(args) -> int:
+    config = _load(args)
+    if not config.watches:
+        print("Nothing is being tracked. Add one with `flighttracker add`.")
+        return EXIT_OK
+
+    conn = connect(config.settings.db_path)
+    counts = observation_counts(conn)
+    for watch in config.watches:
+        searches = watch.searches()
+        window = describe(searches[0])
+        if len(searches) > 1:
+            window += f", and {len(searches) - 1} other date(s)"
+        print(f"{watch.id}")
+        print(f"  {watch.route}, {watch.cabin} · {window}")
+        print(f"  {counts.get(watch.id, 0)} price(s) recorded")
     return EXIT_OK

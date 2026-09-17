@@ -1,0 +1,140 @@
+# Add or remove a tracked flight from a browser — no clone, no terminal.
+#
+# Actions -> "Add or remove a flight" -> Run workflow, fill the form. It edits
+# watches.yaml, commits it, and rebuilds the dashboard. A phone can drive this.
+name: Add or remove a flight
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        required: true
+        type: choice
+        options: [add, remove]
+        default: add
+      route:
+        description: "Add: where and when — JFK-HND:2026-12-10 (or ...:2026-12-10..2026-12-20 for a range)"
+        required: false
+        type: string
+      returning:
+        description: "Add: return date, or a range. Leave blank for one-way."
+        required: false
+        type: string
+      watch_id:
+        description: "Remove: the id to drop. Add: an optional short name."
+        required: false
+        type: string
+      cabin:
+        description: "Add: cabin"
+        required: false
+        type: choice
+        options: [economy, premium-economy, business, first]
+        default: economy
+      adults:
+        description: "Add: how many adults"
+        required: false
+        type: string
+        default: "1"
+      nonstop:
+        description: "Add: nonstop flights only"
+        required: false
+        type: boolean
+        default: false
+      max_price:
+        description: "Add: always email me below this price"
+        required: false
+        type: string
+      purge:
+        description: "Remove: also delete its recorded prices"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# The tracking run also commits to this repo. Sharing a concurrency group with
+# it would queue this behind a 45-minute scrape, so it takes its own and the
+# push step retries on top of whatever landed meanwhile.
+concurrency:
+  group: edit-watchlist
+  cancel-in-progress: false
+
+jobs:
+  edit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Edit the watchlist
+        env:
+          ACTION: ${{ inputs.action }}
+          ROUTE: ${{ inputs.route }}
+          RETURNING: ${{ inputs.returning }}
+          WATCH_ID: ${{ inputs.watch_id }}
+          CABIN: ${{ inputs.cabin }}
+          ADULTS: ${{ inputs.adults }}
+          NONSTOP: ${{ inputs.nonstop }}
+          MAX_PRICE: ${{ inputs.max_price }}
+          PURGE: ${{ inputs.purge }}
+        # Every input goes in through the environment rather than being
+        # interpolated into this script, so a value containing shell syntax is
+        # an argument and never something to execute.
+        run: |
+          set -euo pipefail
+          if [ "$ACTION" = "remove" ]; then
+            if [ -z "$WATCH_ID" ]; then
+              echo "::error::Removing needs the id of the watch to drop." >&2
+              exit 1
+            fi
+            args=(remove "$WATCH_ID")
+            [ "$PURGE" = "true" ] && args+=(--purge)
+          else
+            if [ -z "$ROUTE" ]; then
+              echo "::error::Adding needs a route, e.g. JFK-HND:2026-12-10." >&2
+              exit 1
+            fi
+            args=(add "$ROUTE" --cabin "$CABIN" --adults "$ADULTS")
+            [ -n "$RETURNING" ] && args+=(--return "$RETURNING")
+            [ -n "$WATCH_ID" ] && args+=(--id "$WATCH_ID")
+            [ -n "$MAX_PRICE" ] && args+=(--max-price "$MAX_PRICE")
+            [ "$NONSTOP" = "true" ] && args+=(--nonstop)
+          fi
+          python -m flighttracker "${args[@]}"
+
+      - name: Show what is now tracked
+        run: python -m flighttracker list
+
+      - name: Rebuild the dashboard
+        run: python -m flighttracker dashboard --out index.html
+
+      - name: Commit the change
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          set -euo pipefail
+          git config user.name "flight-price-tracker"
+          git config user.email "actions@github.com"
+          git add -A watches.yaml index.html data/ 2>/dev/null || git add -A watches.yaml
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          git commit -m "Watchlist: ${ACTION} a flight"
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Push attempt ${attempt} failed; retrying."
+            sleep $((attempt * 5))
+          done
+          echo "Could not push the watchlist change." >&2
+          exit 1
