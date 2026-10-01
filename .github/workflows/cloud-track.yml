@@ -1,0 +1,37 @@
+# Price everything the web app is watching, twice a day.
+#
+# Replaces the watches.yaml-driven workflow for the hosted product: the app
+# owns the watchlist and the history, and this job is only the part that has
+# to talk to Google Flights. It keeps running here rather than on Vercel
+# because a run takes minutes of deliberately spaced requests, well past any
+# serverless function's ceiling.
+name: Track hosted watchlist
+
+on:
+  schedule:
+    - cron: "0 7,19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cloud-track
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Price the watchlist and publish
+        env:
+          FLIGHTWATCH_URL: ${{ vars.FLIGHTWATCH_URL }}
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: python -m flighttracker cloud-run

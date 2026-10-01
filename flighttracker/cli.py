@@ -25,11 +25,13 @@ from .backtest import format_result, format_sweep, run_backtest, sweep
 from .env import load_env_file
 from .errors import ConfigError, FlightTrackerError
 from .evaluate import evaluate_stored, format_evaluation
-from .fetch import GoogleFlightsFetcher
+from .cloud import Cloud, fit_against, project_for
+from .fetch import GoogleFlightsFetcher, collect
 from .health import check as check_health
 from .health import summarize as summarize_health
 from .run import commit_alerts, evaluate_only, execute_run
 from .store import (
+    HorizonSample,
     connect,
     forget_watch,
     latest_run,
@@ -37,6 +39,7 @@ from .store import (
     observations_for_run,
     parse_iso,
     run_history,
+    to_iso,
     utc_now,
 )
 from .watchlist import CABINS, NewWatch
@@ -253,6 +256,22 @@ def _parser() -> argparse.ArgumentParser:
 
     listing = sub.add_parser("list", help="show what is being tracked")
     listing.set_defaults(handler=_list)
+
+    cloud = sub.add_parser(
+        "cloud-run",
+        help="price the hosted watchlist and publish the results",
+    )
+    cloud.add_argument(
+        "--base-url",
+        default=None,
+        help="the web app's address (default: $FLIGHTWATCH_URL)",
+    )
+    cloud.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch and print, publishing nothing",
+    )
+    cloud.set_defaults(handler=_cloud_run)
 
     return parser
 
@@ -758,3 +777,104 @@ def _list(args) -> int:
         print(f"  {watch.route}, {watch.cabin} · {window}")
         print(f"  {counts.get(watch.id, 0)} price(s) recorded")
     return EXIT_OK
+
+
+def _cloud_run(args) -> int:
+    """Price every watch the web app knows about, and hand back the results.
+
+    The local watchlist and database are not touched: the hosted app is the
+    only store. This is the command the scheduled workflow runs.
+    """
+    base_url = args.base_url or os.environ.get("FLIGHTWATCH_URL", "")
+    secret = os.environ.get("SYNC_SECRET", "")
+    if not base_url:
+        print(
+            "Set FLIGHTWATCH_URL to the web app's address, or pass --base-url.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG
+    if not secret:
+        print("Set SYNC_SECRET to the web app's sync secret.", file=sys.stderr)
+        return EXIT_CONFIG
+
+    cloud = Cloud(base_url=base_url, secret=secret)
+    watches, history = cloud.watchlist()
+    print(f"{len(watches)} watch(es), {len(history)} stored price(s) to fit against")
+    if not watches:
+        print("Nothing to do.")
+        return EXIT_OK
+
+    # The hosted watchlist is the only source of work, so there is no local
+    # config to read: the defaults govern request spacing and retries.
+    settings = Settings()
+    result = collect(
+        watches,
+        make_fetcher(settings.currency, os.environ.get("HTTPS_PROXY_FOR_SCRAPE")),
+        settings,
+        on_event=print,
+    )
+
+    now = utc_now()
+    stamp = to_iso(now)
+    prices = [
+        {
+            "watch_id": quote.watch_id,
+            "observed_at": stamp,
+            "price": float(quote.price),
+            "currency": quote.currency,
+            "depart_date": quote.depart_date.isoformat(),
+            "return_date": quote.return_date.isoformat() if quote.return_date else None,
+            "airlines": ", ".join(quote.airlines) or None,
+            "stops": quote.stops,
+            "duration_minutes": quote.duration_minutes,
+        }
+        for quote in result.quotes
+    ]
+
+    # Fit once, against this run's prices as well as the stored ones — today's
+    # observations are the most informative ones the model will ever have.
+    model = fit_against(list(history) + [
+        HorizonSample(
+            watch_id=row["watch_id"],
+            origin="",
+            destination="",
+            observed_on=row["observed_at"],
+            depart_date=row["depart_date"],
+            price=row["price"],
+        )
+        for row in prices
+    ])
+
+    cheapest: dict[str, float] = {}
+    for row in prices:
+        seen = cheapest.get(row["watch_id"])
+        if seen is None or row["price"] < seen:
+            cheapest[row["watch_id"]] = row["price"]
+
+    projections = []
+    for watch in watches:
+        current = cheapest.get(watch.id)
+        if current is not None:
+            projections.extend(project_for(watch, model, current, now))
+
+    print(
+        f"{len(prices)} price(s), {len(result.failures)} failure(s), "
+        f"{len(projections)} projected point(s), "
+        f"model evidence {model.evidence():.0%}"
+    )
+
+    if args.dry_run:
+        print("Dry run — nothing published.")
+        return EXIT_OK
+
+    stored = cloud.publish(
+        prices,
+        projections,
+        run={
+            "searches": len(prices) + len(result.failures),
+            "failures": len(result.failures),
+            "note": f"{len(watches)} watch(es)",
+        },
+    )
+    print(f"Published: {stored}")
+    return EXIT_STALE if not prices and result.failures else EXIT_OK
