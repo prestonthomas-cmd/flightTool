@@ -10,7 +10,7 @@ from datetime import date
 
 from flighttracker import cli
 from flighttracker.config import load_config
-from flighttracker.store import connect, observation_counts, run_history
+from flighttracker.store import connect, last_alert, observation_counts, run_history
 from flighttracker.watchlist import watch_ids
 
 from .support import StubFetcher
@@ -91,13 +91,21 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_RUN_FAILED)
         self.assertIn("Every lookup failed", err)
 
-    def test_a_run_with_a_signal_but_no_email_configured_says_so(self):
+    def test_a_signal_with_no_email_set_up_is_not_a_failure(self):
         with mock.patch.dict("os.environ", {"SMTP_HOST": "", "EMAIL_FROM": "", "EMAIL_TO": ""}), \
                 mock.patch.object(cli, "make_fetcher", return_value=StubFetcher(default=700)):
-            code, _, err = self.invoke("run")
+            code, out, _ = self.invoke("run")
 
-        self.assertEqual(code, cli.EXIT_EMAIL_FAILED)
-        self.assertIn("Email not configured", err)
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("dashboard only", out)
+
+    def test_an_unsent_signal_is_not_recorded_as_sent(self):
+        """Otherwise the cooldown hides it on the dashboard, the only place it shows."""
+        with mock.patch.dict("os.environ", {"SMTP_HOST": "", "EMAIL_FROM": "", "EMAIL_TO": ""}), \
+                mock.patch.object(cli, "make_fetcher", return_value=StubFetcher(default=700)):
+            self.invoke("run")
+
+        self.assertIsNone(last_alert(connect(self.tmp / "prices.db"), "tokyo"))
 
     def test_a_quiet_run_with_nothing_flagged_sends_no_email(self):
         self.config.write_text(

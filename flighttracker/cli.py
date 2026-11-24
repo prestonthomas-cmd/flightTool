@@ -336,8 +336,13 @@ def _run(args) -> int:
     try:
         smtp = SmtpConfig.from_env()
     except EmailNotConfigured as exc:
-        print(f"Email not configured: {exc}", file=sys.stderr)
-        return EXIT_EMAIL_FAILED
+        # Email is optional: the dashboard shows the same signals. Nothing is
+        # recorded as sent, because the cooldown would then hide the signal on
+        # the dashboard too — and the first run after email is set up sends it.
+        # A watch that has stopped collecting still fails the run below, since
+        # without email that failure is the only notice there is.
+        note(f"Email not set up ({exc}); signals are on the dashboard only.")
+        return EXIT_STALE if (blocking and args.fail_if_stale) else EXIT_OK
 
     message = build_message(
         smtp, outcome.when, outcome.verdicts, outcome.failures, concerns
